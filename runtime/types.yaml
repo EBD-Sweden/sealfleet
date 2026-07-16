@@ -1,0 +1,45 @@
+types:
+  # Primitives (pass-through, no producer needed)
+  String:
+    description: Plain text value
+    primitive: true
+  Float:
+    description: Floating point number
+    primitive: true
+  Integer:
+    description: Integer number
+    primitive: true
+
+  # Domain types
+  WeatherData:
+    description: Current weather conditions for a location
+    fields:
+      location: {type: String}
+      temp_c: {type: Float}
+      condition: {type: String}
+      humidity: {type: Integer}
+      wind_kph: {type: Float}
+      feels_like_c: {type: Float}
+
+  OutfitRecommendation:
+    description: Clothing recommendation based on weather conditions
+    fields:
+      location: {type: String}
+      weather_summary: {type: String}
+      recommendation: {type: String}
+      outfit_items: {type: String, array: true}
+
+  StockPrice:
+    description: Current stock price data
+    fields:
+      symbol: {type: String}
+      price: {type: Float}
+      volume: {type: Integer}
+      date: {type: String}
+
+  VolatilityMetrics:
+    description: Historical volatility and beta for a stock
+    fields:
+      symbol: {type: String}
+      annualised_vol: {type: Float}
+      window_days: {type: Integer}

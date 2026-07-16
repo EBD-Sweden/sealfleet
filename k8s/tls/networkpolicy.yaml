@@ -1,0 +1,157 @@
+# Sealfleet internal traffic restriction — defense-in-depth for SOC 2 CC6.7 / CC6.6.
+#
+# These NetworkPolicies do NOT encrypt traffic (that is the mTLS/mesh work, still
+# open — see docs/SOC2_GAP_ANALYSIS.md). They reduce the blast radius by limiting
+# WHICH workloads may talk to the core control-plane services, so that even on a
+# plain-HTTP internal hop only the intended callers can reach a service.
+#
+# SAFETY: NetworkPolicy is only enforced if the CNI supports it. k3d's default
+# flannel CNI does NOT enforce NetworkPolicy, so applying these on the dev
+# cluster is a NO-OP at the dataplane (they are still valid objects and serve as
+# declarative intent + are enforced on any CNI that supports them, e.g. Calico/
+# Cilium in prod). Because they are no-ops on flannel they cannot disrupt the
+# recovered dev cluster. On a policy-enforcing CNI, verify connectivity after
+# applying.
+#
+# Model: default-deny ingress for the labeled control-plane pods, then allow only
+# the specific peers each one needs. Egress is left open (DNS + external APIs +
+# DB live outside these labels); tighten egress in prod once the DB/peer set is
+# pinned.
+---
+# Baseline: deny all ingress to control-plane pods unless explicitly allowed below.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcpfinder-default-deny-ingress
+  namespace: default
+  labels:
+    part-of: mcpfinder
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchExpressions:
+      - key: part-of
+        operator: In
+        values: ["mcpfinder"]
+  policyTypes:
+    - Ingress
+  ingress: []
+---
+# Router (:8040) — reachable from the portal, deploy, core-agent, and the Traefik
+# ingress controller (kube-system). The router fans out to MCP backends via egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcpfinder-allow-router-ingress
+  namespace: default
+  labels:
+    part-of: mcpfinder
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-router
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcpfinder-portal
+        - podSelector:
+            matchLabels:
+              app: mcp-deploy
+        - podSelector:
+            matchLabels:
+              app: core-agent
+        # Traefik ingress controller (edge TLS termination -> router).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8040
+---
+# Deploy (:8030) — reachable from the portal and the Traefik ingress controller.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcpfinder-allow-deploy-ingress
+  namespace: default
+  labels:
+    part-of: mcpfinder
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-deploy
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcpfinder-portal
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8030
+---
+# Registry (:8010) — reachable from the router, deploy, portal, and the ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcpfinder-allow-registry-ingress
+  namespace: default
+  labels:
+    part-of: mcpfinder
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-registry
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcp-router
+        - podSelector:
+            matchLabels:
+              app: mcp-deploy
+        - podSelector:
+            matchLabels:
+              app: mcpfinder-portal
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8010
+---
+# Portal (:3004) — public entry point, reachable from the Traefik ingress only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcpfinder-allow-portal-ingress
+  namespace: default
+  labels:
+    part-of: mcpfinder
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: mcpfinder-portal
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 3004

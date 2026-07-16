@@ -1,0 +1,31 @@
+# Sealfleet Crypto Trading Policy Pack
+# Additional rules for crypto trading use case.
+
+name: crypto-trading
+version: "0.1.0"
+description: "Policy pack for crypto trading — rate limits, redactions, approval flows"
+
+rules:
+  - name: allow-price-quotes
+    decision: allow
+    priority: 60
+    match:
+      scopes: ["tools:execute"]
+      resources: ["crypto.price_quote"]
+    reason: "Price quotes are read-only and safe"
+
+  - name: redact-trade-details
+    decision: redact
+    priority: 55
+    match:
+      scopes: ["tools:execute"]
+      resources: ["crypto.execute_trade"]
+    reason: "Trade execution allowed but sensitive fields redacted in logs"
+    redactions: ["api_key", "signing_key", "private_key"]
+
+  - name: deny-trade-without-scope
+    decision: deny
+    priority: 40
+    match:
+      resources: ["crypto.execute_trade"]
+    reason: "Trade execution requires explicit tools:execute scope"

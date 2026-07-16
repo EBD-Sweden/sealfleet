@@ -1,0 +1,76 @@
+{{- if .Values.ingress.enabled }}
+{{- $portal := include "mcpfinder.componentName" (dict "ctx" . "component" "portal") }}
+{{- $router := include "mcpfinder.componentName" (dict "ctx" . "component" "router") }}
+{{- $deploy := include "mcpfinder.componentName" (dict "ctx" . "component" "deploy") }}
+{{- $registry := include "mcpfinder.componentName" (dict "ctx" . "component" "registry") }}
+{{- $h := .Values.ingress.hosts }}
+# Edge TLS ingress (SOC 2 CC6.7). Mirrors k8s/tls/ingress.yaml. One host per
+# service; defaults assume Traefik but className/annotations are overridable for
+# nginx / ALB (AWS) / GCE (GCP).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.certManager.enabled }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.tls.certManager.clusterIssuer | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ $h.portal | quote }}
+        - {{ $h.router | quote }}
+        - {{ $h.deploy | quote }}
+        - {{ $h.registry | quote }}
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  {{- end }}
+  rules:
+    - host: {{ $h.portal | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $portal }}
+                port:
+                  number: {{ .Values.portal.port }}
+    - host: {{ $h.router | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $router }}
+                port:
+                  number: {{ .Values.router.port }}
+    - host: {{ $h.deploy | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $deploy }}
+                port:
+                  number: {{ .Values.deploy.port }}
+    - host: {{ $h.registry | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $registry }}
+                port:
+                  number: {{ .Values.registry.port }}
+{{- end }}

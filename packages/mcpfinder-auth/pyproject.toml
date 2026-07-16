@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "mcpfinder-auth"
+version = "0.2.0"
+description = "JWT/JWKS auth middleware for Sealfleet MCP servers"
+requires-python = ">=3.11"
+dependencies = [
+    "PyJWT[cryptography]>=2.8.0",
+    "httpx>=0.27.0",
+    "starlette>=0.40.0",
+]
+
+[project.optional-dependencies]
+fastapi = ["fastapi>=0.110.0"]

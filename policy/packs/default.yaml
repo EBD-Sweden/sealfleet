@@ -1,0 +1,37 @@
+# Sealfleet Default Policy Pack
+# Provides sensible defaults for MVP deployments.
+
+name: default
+version: "0.1.0"
+description: "Default policy pack — admin full access, users execute tools"
+
+rules:
+  - name: admin-full-access
+    decision: allow
+    priority: 100
+    match:
+      roles: ["admin"]
+    reason: "Admin has full access"
+
+  - name: user-list-tools
+    decision: allow
+    priority: 50
+    match:
+      scopes: ["tools:list"]
+      actions: ["list_tools"]
+    reason: "Users with tools:list scope can list tools"
+
+  - name: user-execute-tools
+    decision: allow
+    priority: 50
+    match:
+      scopes: ["tools:execute"]
+      actions: ["call_tool"]
+    reason: "Users with tools:execute scope can call tools"
+
+  - name: deny-unauthenticated
+    decision: deny
+    priority: 10
+    match:
+      roles: ["anonymous"]
+    reason: "Unauthenticated access denied"

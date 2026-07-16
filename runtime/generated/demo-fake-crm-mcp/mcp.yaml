@@ -1,0 +1,51 @@
+id: demo-fake-crm-mcp
+name: demo-fake-crm-mcp
+endpoint: stdio://demo-generated-openapi/fake-crm
+transport: stdio
+publishes:
+- DemoCustomer
+subscribes: []
+metadata:
+  tenant: demo-sandbox
+  workspace: demo-external-evaluation
+  data_classification: fake-demo-only
+  source: checked-in:fake-crm-openapi
+  network: disabled
+  credentials: disabled
+tools:
+- name: get_demo_customer
+  description: Returns deterministic fake CRM data; no network calls and no real credentials.
+  inputSchema:
+    type: object
+    required:
+    - customer_id
+    properties:
+      customer_id:
+        type: string
+        description: Fake customer id such as CUST-DEMO-001.
+    additionalProperties: false
+  inputs:
+    customer_id:
+      type: String
+      required: true
+      description: Fake customer id such as CUST-DEMO-001.
+  outputs:
+    classification:
+      type: String
+      required: true
+    customer_id:
+      type: String
+      required: true
+    name:
+      type: String
+      required: true
+    tier:
+      type: String
+      required: true
+    open_invoices:
+      type: Integer
+      required: true
+  tags:
+  - demo
+  - openapi
+  - fake-data

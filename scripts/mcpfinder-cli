@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Compatibility executable for the canonical McpFinder MCP server CLI.
+# Prefer: python -m runtime.cli
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$DIR/mcpfinder_cli.py" "$@"

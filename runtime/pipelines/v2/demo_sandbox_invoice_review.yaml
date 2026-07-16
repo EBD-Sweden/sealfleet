@@ -1,0 +1,67 @@
+name: demo_sandbox_invoice_review
+version: 2
+description: "Executable sandbox pipeline for external testers: fake invoice summary plus fake vendor score."
+inputs:
+  tenant:
+    type: string
+    default: demo-sandbox
+  workspace:
+    type: string
+    default: demo-external-evaluation
+  invoice_id:
+    type: string
+    default: INV-DEMO-001
+  amount_usd:
+    type: number
+    default: 12450.0
+  vendor_name:
+    type: string
+    default: Northwind Demo Supplies
+  country:
+    type: string
+    default: SE
+  risk_hint:
+    type: string
+    default: "fake data: new vendor, normal payment terms"
+safety:
+  tenant_scope: demo-sandbox
+  workspace_scope: demo-external-evaluation
+  data_classification: fake-demo-only
+  sealed_inputs: disabled-for-demo
+  egress: deny-external
+  cleanup_ttl_hours: 24
+  quota:
+    requests_per_minute: 20
+    pipeline_runs_per_hour: 10
+    max_payload_bytes: 65536
+expected_output:
+  classification: fake-demo-only
+  invoice_summary:
+    invoice_id: INV-DEMO-001
+    status: review_required
+    reasons:
+      - amount exceeds demo auto-approve threshold
+      - fake vendor onboarding check required
+  vendor_score:
+    vendor_name: Northwind Demo Supplies
+    score: 72
+    tier: demo-medium
+steps:
+  - id: summarize_invoice
+    mcp: demo-sandbox-mcp
+    tool: summarize_fake_invoice
+    inputs:
+      invoice_id: "{{inputs.invoice_id}}"
+      amount_usd: "{{inputs.amount_usd}}"
+      vendor_name: "{{inputs.vendor_name}}"
+  - id: score_vendor
+    mcp: demo-sandbox-mcp
+    tool: score_fake_vendor
+    inputs:
+      vendor_name: "{{inputs.vendor_name}}"
+      country: "{{inputs.country}}"
+      risk_hint: "{{inputs.risk_hint}}"
+output:
+  classification: fake-demo-only
+  invoice_summary: "{{steps.summarize_invoice.output}}"
+  vendor_score: "{{steps.score_vendor.output}}"

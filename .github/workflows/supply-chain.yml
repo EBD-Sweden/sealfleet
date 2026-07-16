@@ -1,0 +1,144 @@
+name: Supply chain (SBOM + image signing)
+
+# SOC2 CC8.1 (change management / supply chain integrity):
+#   * Build the core service images.
+#   * Generate an SBOM (CycloneDX + SPDX) per image with syft and attach it as
+#     a build artifact / attestation.
+#   * Sign images keyless with cosign (Sigstore / GitHub OIDC) AND attach the
+#     SBOM as a signed attestation — but ONLY when the image is actually pushed
+#     to a registry (i.e. on push to main/master or a tag). On pull_request the
+#     image stays local, so signing is skipped (no broken hard dependency on a
+#     registry/OIDC that isn't available for fork PRs) while SBOM generation
+#     still runs and is uploaded as an artifact.
+#
+# Default behaviour is additive: this workflow does not gate the existing CI or
+# change how images are built/deployed elsewhere.
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  sbom-and-sign:
+    name: SBOM + sign (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write      # push images to GHCR
+      id-token: write      # cosign keyless (OIDC)
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [runtime, deploy, registry, agent, portal]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Push only on branch push / tag, never on pull_request (incl. forks).
+      - name: Decide whether to push
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image ref
+        id: img
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "name=${REGISTRY}/${owner}/sealfleet-${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+
+      # Generate release tags: sha (always), `latest` on the default branch, and
+      # the full/major.minor semver on v* tags — so Helm/Terraform can pin a
+      # real version (image.tag) that resolves to a published, signed image.
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Log in to registry
+        if: steps.mode.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build (and conditionally push) the image; capture the digest so we can
+      # sign/attest by immutable digest rather than a mutable tag.
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service }}/Dockerfile
+          push: ${{ steps.mode.outputs.push }}
+          load: ${{ steps.mode.outputs.push == 'false' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+
+      # SBOM generation always runs (PRs included) and is uploaded as an artifact.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM (CycloneDX + SPDX)
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.mode.outputs.push }}" = "true" ]; then
+            target="${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"
+          else
+            target="${{ steps.img.outputs.name }}:${{ steps.meta.outputs.version }}"
+          fi
+          echo "Generating SBOM for $target"
+          syft "$target" -o cyclonedx-json="sbom-${{ matrix.service }}.cdx.json"
+          syft "$target" -o spdx-json="sbom-${{ matrix.service }}.spdx.json"
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}
+          path: |
+            sbom-${{ matrix.service }}.cdx.json
+            sbom-${{ matrix.service }}.spdx.json
+          if-no-files-found: error
+
+      # Keyless signing + signed SBOM attestation, only for pushed images.
+      - name: Install cosign
+        if: steps.mode.outputs.push == 'true'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless / OIDC)
+        if: steps.mode.outputs.push == 'true'
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign "${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"
+
+      - name: Attest SBOM (signed attestation)
+        if: steps.mode.outputs.push == 'true'
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign attest \
+            --predicate "sbom-${{ matrix.service }}.cdx.json" \
+            --type cyclonedx \
+            "${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"

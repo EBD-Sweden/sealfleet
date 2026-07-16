@@ -1,0 +1,61 @@
+name: New MCP pipeline
+summary: Create a new MCP pipeline with Kubernetes service-DNS routing
+labels: [mcp, pipeline, routing]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for any new MCP pipeline. MCP-to-MCP traffic must use Kubernetes Service DNS, not host-local URLs.
+
+  - type: input
+    id: mcp_name
+    attributes:
+      label: MCP name
+      description: Canonical MCP name, usually `<name>-mcp`.
+      placeholder: weather-trip-mcp
+    validations:
+      required: true
+
+  - type: input
+    id: service_name
+    attributes:
+      label: Kubernetes Service name
+      description: DNS name used inside the cluster. Default should match MCP name unless intentionally different.
+      placeholder: weather-trip-mcp
+    validations:
+      required: true
+
+  - type: input
+    id: service_port
+    attributes:
+      label: Service port
+      placeholder: '8041'
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: tasks
+    attributes:
+      label: Required implementation tasks
+      options:
+        - label: Add `runtime/manifests/<mcp>.yaml` with endpoint `http://<service-name>:<port>`.
+          required: true
+        - label: Add Kubernetes Deployment and Service manifests.
+          required: true
+        - label: Add service to `MCP_DEPLOYMENT_MAP` if it can scale to zero.
+          required: true
+        - label: Update router `ENDPOINT_OVERRIDES` to service DNS.
+          required: true
+        - label: Avoid `localhost`, `127.0.0.1`, `host.k3d.internal`, and NodePort URLs for MCP-to-MCP traffic.
+          required: true
+        - label: Run `scripts/check-cluster-routing.sh` before handoff.
+          required: true
+
+  - type: textarea
+    id: smoke
+    attributes:
+      label: Smoke test plan
+      description: Include the minimal request that proves the pipeline works from scale-to-zero.
+      placeholder: RUN_SMOKE=1 scripts/diagnose-cluster-restart.sh
+    validations:
+      required: true

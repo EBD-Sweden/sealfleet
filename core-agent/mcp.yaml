@@ -1,0 +1,11 @@
+name: core-agent
+description: LLM-powered agent that answers natural language questions using the Sealfleet runtime
+endpoint: http://core-agent:8050
+auth:
+  type: none
+tags: [agent, llm, orchestration]
+tools:
+  - name: ask
+    description: Answer a natural language question using available MCP tools
+    input_schema:
+      question: {type: string, required: true, description: Natural language question}

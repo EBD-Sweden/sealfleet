@@ -1,0 +1,66 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+node_modules/
+dist/
+build/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.DS_Store
+
+# Runtime artifacts / logs
+*.log
+runtime/logs/
+runtime/.generated/
+*.pid
+.pids
+runtime/.pids
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+# Local Bolagsverket bulk/download artifacts. These are large operator-supplied
+# caches, not public demo fixtures; see data/README.md.
+data/bolagsverket_bulkfil.txt
+data/scb_bulkfil_*.txt
+data/bv_zip_cache/
+data/sample_ixbrl/
+# Tooling caches / scratch
+.ruff_cache/
+.coverage
+htmlcov/
+*.tmp
+*.bak
+*.swp
+# Out-of-scope on the public branch only (kept in this private repo)
+pitch/
+evidinvest/
+# Local agent/harness state
+.claude/
+# TLS material — never commit private keys or generated certs/Secrets.
+k8s/tls/_certs/
+*.key
+*.pem
+tls.crt
+*-tls.secret.yaml
+
+# Private extension overlays (see docs/BUILD_YOUR_OWN_MCP.md §7) — tracked in
+# a separate private repo when used; the platform runs without them.
+runtime/router_internal.py
+runtime/channels_internal.yaml
+runtime/tests/test_router_internal_endpoints.py
+portal/src/internal/
+k8s-internal/
+scripts/start-local-internal.sh
+scripts/internal-setup.sh
+INTERNAL.md
+
+# Terraform local state / provider cache
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log

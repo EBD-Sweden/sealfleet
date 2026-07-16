@@ -1,0 +1,51 @@
+openapi: 3.1.0
+info:
+  title: Fake CRM Demo API
+  version: 0.1.0
+  description: Checked-in fake OpenAPI spec used only for Sealfleet public_demo OpenAPI-to-MCP creation.
+servers:
+  - url: https://example.invalid/fake-crm
+paths:
+  /customers/{customer_id}:
+    get:
+      operationId: get_demo_customer
+      summary: Get a fake demo customer by ID
+      description: Returns deterministic fake CRM data; no network calls and no real credentials.
+      parameters:
+        - name: customer_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Fake customer id such as CUST-DEMO-001.
+      responses:
+        "200":
+          description: Fake customer profile
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - classification
+                  - customer_id
+                  - name
+                  - tier
+                  - open_invoices
+                properties:
+                  classification:
+                    type: string
+                    const: fake-demo-only
+                  customer_id:
+                    type: string
+                  name:
+                    type: string
+                  tier:
+                    type: string
+                  open_invoices:
+                    type: integer
+x-mcpfinder-demo:
+  data_classification: fake-demo-only
+  tenant_scope: demo-sandbox
+  workspace_scope: demo-external-evaluation
+  network: disabled
+  credentials: disabled

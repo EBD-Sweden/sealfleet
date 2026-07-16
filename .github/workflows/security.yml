@@ -1,0 +1,82 @@
+name: Security scan
+
+# SOC2 CC8.1 (change management / supply chain): SAST, dependency, secret, and
+# filesystem vulnerability scanning on every PR and push to main/master.
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 6 * * 1'   # weekly baseline scan
+
+permissions:
+  contents: read
+
+jobs:
+  sast-bandit:
+    name: SAST (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install bandit
+      # Fail on medium+ severity / medium+ confidence findings in app code.
+      - run: bandit -r runtime deploy registry broker policy packages -ll -ii -x '**/tests/**,**/.venv/**'
+
+  deps-pip-audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pip-audit
+      - name: Audit requirement files
+        run: |
+          for req in runtime/requirements.txt deploy/requirements.txt registry/requirements.txt; do
+            [ -f "$req" ] && { echo "== $req =="; pip-audit -r "$req" --strict; }
+          done
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The gitleaks-action wrapper requires a paid license for org repos;
+      # the OSS CLI does not. Config: .gitleaks.toml (auto-detected).
+      - name: Run gitleaks CLI
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o gitleaks.tgz
+          tar -xzf gitleaks.tgz gitleaks
+          ./gitleaks detect --source . --redact --no-banner --exit-code 1
+
+  fs-vuln-trivy:
+    name: Filesystem vuln + secrets (trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+      # Misconfig hardening (Dockerfile USER, k8s securityContext, terraform
+      # example modules) is tracked work — report it without blocking until
+      # the hardening lands, then flip exit-code to '1'.
+      - name: Misconfiguration report (non-blocking)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scanners: misconfig
+          severity: CRITICAL,HIGH
+          exit-code: '0'

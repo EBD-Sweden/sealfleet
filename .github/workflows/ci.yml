@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  python-tests:
+    name: Python tests (runtime + auth)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r runtime/requirements.txt pytest pyyaml
+
+      - name: Run test suite
+        env:
+          PYTHONPATH: packages/mcpfinder-auth/src
+        run: python -m pytest runtime/tests packages/mcpfinder-auth/tests -q
+
+  portal:
+    name: Portal lint + unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: portal
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test
+
+      # Non-blocking: there are known pre-existing react-hooks/set-state-in-effect
+      # findings in the finance pages pending a refactor. Surfaced, not gating.
+      - name: Lint (non-blocking)
+        run: npm run lint
+        continue-on-error: true

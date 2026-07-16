@@ -1,0 +1,71 @@
+name: DAST (ZAP)
+
+# Dynamic security testing (SOC 2 CC4.1/CC7.1): brings up the full stack via
+# docker compose and runs OWASP ZAP — an authenticated API scan against the
+# runtime router (OpenAPI-driven) plus a baseline scan of the portal.
+# Heavy (full stack + active scan), so it runs on demand + weekly, not per-PR.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1'   # weekly Monday 04:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  zap:
+    name: ZAP scan against compose stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bring up the stack
+        run: |
+          docker compose up -d --build
+          echo "Waiting for the router to be healthy..."
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8040/health || true)
+            [ "$code" = "200" ] && { echo "router up"; break; }
+            sleep 5
+          done
+          curl -fsS http://localhost:8040/health
+
+      - name: ZAP — authenticated API scan (router OpenAPI)
+        continue-on-error: true   # report findings; don't hard-fail the stage on warnings
+        env:
+          # Seeded local-dev operator key (scripts/001_create_api_keys.sql) — dev only.
+          MCPF_KEY: loHPxndS1CBmn-dLHBZwvliXV7ixPyWU_5hlZo-VwpA
+        run: |
+          docker run --rm --network host -v ${{ github.workspace }}:/zap/wrk:rw \
+            ghcr.io/zaproxy/zaproxy:stable zap-api-scan.py \
+            -t http://localhost:8040/openapi.json -f openapi -I -T 8 \
+            -r zap-api-report.html -w zap-api-report.md \
+            -z "-config replacer.full_list(0).description=apikey \
+                -config replacer.full_list(0).enabled=true \
+                -config replacer.full_list(0).matchtype=REQ_HEADER \
+                -config replacer.full_list(0).matchstr=X-API-Key \
+                -config replacer.full_list(0).replacement=$MCPF_KEY \
+                -config replacer.full_list(0).initiators="
+
+      - name: ZAP — portal baseline
+        continue-on-error: true
+        run: |
+          docker run --rm --network host -v ${{ github.workspace }}:/zap/wrk:rw \
+            ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+            -t http://localhost:3004 -I -m 2 -r zap-portal-report.html
+
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-reports
+          path: |
+            zap-api-report.html
+            zap-api-report.md
+            zap-portal-report.html
+          if-no-files-found: warn
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v || true

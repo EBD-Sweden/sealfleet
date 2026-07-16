@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-router
+spec:
+  template:
+    spec:
+      containers:
+        - name: mcp-router
+          env:
+            - name: MCPFINDER_DEPLOYMENT_ENV
+              value: "development"
+            - name: AUTH_ALLOW_EPHEMERAL_KEYS
+              value: "true"
+            - name: DOCKER_STDIO_ENABLED
+              value: "true"
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock

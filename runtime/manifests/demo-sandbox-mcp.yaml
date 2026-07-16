@@ -1,0 +1,48 @@
+id: demo-sandbox-mcp
+name: demo-sandbox-mcp
+endpoint: http://demo-sandbox-mcp.demo-sandbox.svc.cluster.local:8080
+transport: http
+publishes: [demo.invoice.summary, demo.vendor.score]
+subscribes: []
+metadata:
+  tenant: demo-sandbox
+  org: Sealfleet Demo Org
+  workspace: demo-external-evaluation
+  data_classification: fake-demo-only
+  network_policy: egress-deny
+  quotas:
+    requests_per_minute: 20
+    pipeline_runs_per_hour: 10
+    max_payload_bytes: 65536
+  cleanup:
+    ttl_hours: 24
+    command: DRY_RUN=1 NAMESPACE=demo-sandbox SELECTOR=app.kubernetes.io/part-of=mcpfinder-demo-sandbox scripts/k8s-demo-smoke.sh --cleanup
+  safety_boundaries:
+    - Demo MCP uses fake invoice/vendor records only.
+    - No broker credentials or sealed inputs are mounted.
+    - Kubernetes NetworkPolicy denies demo MCP egress.
+    - Runtime tenant/workspace checks restrict callers to demo-sandbox resources.
+tools:
+  - name: summarize_fake_invoice
+    description: Summarize a fake demo invoice and flag missing approval fields.
+    inputs:
+      invoice_id: {type: String, required: true, description: Fake invoice id such as INV-DEMO-001}
+      amount_usd: {type: Number, required: true, description: Fake invoice amount}
+      vendor_name: {type: String, required: true, description: Fake vendor name}
+    outputs:
+      invoice_summary: {type: DemoInvoiceSummary}
+    channel_out: demo.invoice.summary
+    # GDPR: output fields declared here are redacted by the runtime at the
+    # execution boundary before results reach callers, pipelines, or logs.
+    # Dot paths; lists are traversed element-wise; "*" matches any key.
+    pii_fields:
+      - approver_contact
+  - name: score_fake_vendor
+    description: Score a fake demo vendor against simple sandbox-only rules.
+    inputs:
+      vendor_name: {type: String, required: true, description: Fake vendor name}
+      country: {type: String, required: true, description: Fake vendor country}
+      risk_hint: {type: String, required: false, description: Optional fake risk note}
+    outputs:
+      vendor_score: {type: DemoVendorScore}
+    channel_out: demo.vendor.score

@@ -1,0 +1,28 @@
+McpFinder has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Services (ClusterIP):
+  registry : http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "registry") }}:{{ .Values.registry.port }}
+  deploy   : http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "deploy") }}:{{ .Values.deploy.port }}
+  router   : http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "router") }}:{{ .Values.router.port }}
+  portal   : http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "portal") }}:{{ .Values.portal.port }}
+
+{{- if .Values.ingress.enabled }}
+
+External (via Ingress, TLS {{ if .Values.ingress.tls.enabled }}ON{{ else }}OFF{{ end }}):
+  Portal   : https://{{ .Values.ingress.hosts.portal }}
+  Router   : https://{{ .Values.ingress.hosts.router }}
+  Deploy   : https://{{ .Values.ingress.hosts.deploy }}
+  Registry : https://{{ .Values.ingress.hosts.registry }}
+{{- end }}
+
+Router auth posture: REQUIRE_AUTH={{ .Values.router.requireAuth }} AUTH_ALLOW_EPHEMERAL_KEYS={{ .Values.router.allowEphemeralKeys }}
+Postgres: {{ if .Values.postgresql.enabled }}IN-CLUSTER (evaluation only){{ else }}EXTERNAL managed (via secrets.databaseUrl){{ end }}
+
+{{- if .Values.secrets.create }}
+
+!! WARNING: the platform Secret was created from STUB values. Replace every
+   CHANGE_ME value (ENCRYPTION_KEY, ROUTER_RS256_PRIVATE_KEY, NEXTAUTH_SECRET,
+   DATABASE_URL) before any real use. See deploy/README.md hardening checklist.
+{{- end }}
+
+Migrate Job (one-shot, Helm hook): {{ if .Values.migrate.enabled }}ENABLED — applies db/migrations + {{ if .Values.migrate.applySeeds }}seeds{{ else }}no seeds{{ end }}{{ else }}DISABLED — apply schema out-of-band{{ end }}

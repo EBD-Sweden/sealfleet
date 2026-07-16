@@ -1,0 +1,97 @@
+# Sealfleet edge TLS — Traefik Ingress terminating HTTPS for external endpoints.
+#
+# SOC 2 CC6.7 (encryption in transit), edge layer.
+#
+# Prereqs:
+#   1. A TLS Secret named `mcpfinder-tls` in the `default` namespace.
+#      Dev:  ./k8s/tls/gen-selfsigned-cert.sh   (then apply the rendered Secret)
+#      Prod: cert-manager + ACME (see k8s/tls/README.md) — point `secretName`
+#            at the cert-manager-managed Secret and add the issuer annotation.
+#   2. Traefik ingress controller (default in k3d) listening on websecure/:443.
+#
+# This is ADDITIVE: the existing NodePort Services keep working unchanged. The
+# Ingress simply puts a TLS-terminating front door on top of them.
+#
+# Hostnames default to *.sealfleet.local; for local testing add to /etc/hosts:
+#   <node-ip>  router.sealfleet.local deploy.sealfleet.local registry.sealfleet.local portal.sealfleet.local
+---
+# Redirect plain HTTP -> HTTPS at the edge (Traefik middleware).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: mcpfinder-https-redirect
+  namespace: default
+  labels:
+    part-of: mcpfinder
+    soc2-control: cc6.7
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcpfinder-tls
+  namespace: default
+  labels:
+    part-of: mcpfinder
+    soc2-control: cc6.7
+  annotations:
+    # Terminate TLS on Traefik's websecure (:443) entrypoint.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    # Force HTTPS — clients hitting :80 get a 308 to https.
+    traefik.ingress.kubernetes.io/router.middlewares: default-mcpfinder-https-redirect@kubernetescrd
+    # --- PRODUCTION: uncomment to let cert-manager issue/renew via ACME ---
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - router.sealfleet.local
+        - deploy.sealfleet.local
+        - registry.sealfleet.local
+        - portal.sealfleet.local
+      secretName: mcpfinder-tls
+  rules:
+    - host: router.sealfleet.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-router
+                port:
+                  number: 8040
+    - host: deploy.sealfleet.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-deploy
+                port:
+                  number: 8030
+    - host: registry.sealfleet.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-registry
+                port:
+                  number: 8010
+    - host: portal.sealfleet.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcpfinder-portal
+                port:
+                  number: 3004

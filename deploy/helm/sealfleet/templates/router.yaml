@@ -1,0 +1,93 @@
+{{- if .Values.router.enabled }}
+{{- $name := include "mcpfinder.componentName" (dict "ctx" . "component" "router") }}
+{{- $registry := include "mcpfinder.componentName" (dict "ctx" . "component" "registry") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+    app: {{ $name }}
+spec:
+  replicas: {{ .Values.router.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "router") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "router") | nindent 8 }}
+        part-of: mcpfinder
+    spec:
+      {{- if .Values.rbac.create }}
+      serviceAccountName: {{ $name }}-sa
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: router
+          image: {{ include "mcpfinder.image" (dict "ctx" . "svc" .Values.router) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.router.port }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: DATABASE_URL
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: ENCRYPTION_KEY
+            - name: ROUTER_RS256_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: ROUTER_RS256_PRIVATE_KEY
+            - name: REGISTRY_URL
+              value: "http://{{ $registry }}:{{ .Values.registry.port }}"
+            - name: REQUIRE_AUTH
+              value: {{ .Values.router.requireAuth | quote }}
+            - name: AUTH_ALLOW_EPHEMERAL_KEYS
+              value: {{ .Values.router.allowEphemeralKeys | quote }}
+            {{- range $k, $v := .Values.router.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /ready, port: {{ .Values.router.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.router.port }} }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.router.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "router") | nindent 4 }}
+  ports:
+    - port: {{ .Values.router.port }}
+      targetPort: {{ .Values.router.port }}
+      name: http
+{{- end }}

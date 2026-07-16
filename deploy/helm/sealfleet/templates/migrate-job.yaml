@@ -1,0 +1,90 @@
+{{- if .Values.migrate.enabled }}
+# One-shot DB migrate + seed Job. Runs as a Helm post-install/post-upgrade hook
+# AFTER the Secret (and in-cluster Postgres, if enabled) exist. An init container
+# clones the repo at the pinned ref to obtain the SQL assets; the main container
+# applies db/migrations/*.sql, then (optionally) db/seeds/* and
+# scripts/001_create_api_keys.sql with psql. Idempotent (migrations use
+# IF NOT EXISTS / IF EXISTS).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-migrate
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": {{ .Values.migrate.hookWeight | quote }}
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "mcpfinder.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: fetch-sql
+          image: {{ .Values.migrate.git.image | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "cloning {{ .Values.migrate.git.repo }}@{{ .Values.migrate.git.ref }}"
+              git clone --depth 1 --branch "{{ .Values.migrate.git.ref }}" \
+                "{{ .Values.migrate.git.repo }}" /src \
+                || git clone "{{ .Values.migrate.git.repo }}" /src
+              cp -r /src/db /work/db
+              mkdir -p /work/scripts
+              cp /src/scripts/001_create_api_keys.sql /work/scripts/ 2>/dev/null || true
+              echo "sql assets staged in /work"
+          volumeMounts:
+            - { name: work, mountPath: /work }
+      containers:
+        - name: migrate
+          image: {{ .Values.migrate.image | quote }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "waiting for database to accept connections"
+              for i in $(seq 1 60); do
+                if psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1; then break; fi
+                echo "  db not ready yet ($i)"; sleep 3
+              done
+              echo "applying migrations"
+              for f in /work/db/migrations/*.sql; do
+                echo "migrate: $f"
+                psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+              done
+              {{- if .Values.migrate.applySeeds }}
+              echo "applying seeds + api-key bootstrap"
+              for f in /work/db/seeds/*.sql /work/scripts/001_create_api_keys.sql; do
+                [ -f "$f" ] || continue
+                echo "seed: $f"
+                psql "$DATABASE_URL" -f "$f"
+              done
+              {{- end }}
+              echo "migrations + seeds complete"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: DATABASE_URL
+          volumeMounts:
+            - { name: work, mountPath: /work }
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+      volumes:
+        - name: work
+          emptyDir: {}
+{{- end }}

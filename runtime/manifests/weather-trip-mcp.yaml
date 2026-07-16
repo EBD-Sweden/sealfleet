@@ -1,0 +1,20 @@
+id: weather-trip-mcp
+name: weather-trip-mcp
+endpoint: http://weather-trip-mcp:8080
+transport: http
+publishes: []
+subscribes: []
+metadata:
+  org: Sealfleet Examples
+  data_classification: public-read-only
+  description: >
+    Public example MCP for the weather trip planner dashboard. Fetches real
+    daily weather (past week + next ~10 days) from free key-less APIs
+    (Open-Meteo, met.no fallback) and deterministically ranks cities against
+    trip preferences (sunshine, target temperature, low wind).
+  safety_boundaries:
+    - Read-only public weather data; no credentials or sealed inputs.
+    - Deterministic arithmetic scoring; no LLM in the loop.
+tools:
+  - fetch_cities_weather
+  - rank_cities

@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: core-agent
+  namespace: default
+  labels:
+    app: core-agent
+    part-of: mcpfinder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: core-agent
+  template:
+    metadata:
+      labels:
+        app: core-agent
+    spec:
+      containers:
+      - name: core-agent
+        image: mcpfinder-registry:5050/core-agent:latest
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          seccompProfile:
+            type: RuntimeDefault
+          capabilities:
+            drop: ["ALL"]
+        ports:
+        - containerPort: 8050
+          name: http
+        envFrom:
+        - secretRef:
+            name: mcpfinder-core-agent
+        env:
+        - name: ROUTER_URL
+          value: http://mcp-router:8040
+        - name: OPENAI_BASE_URL
+          value: http://host.k3d.internal:3456/v1
+        - name: OPENAI_MODEL
+          value: claude-sonnet-4
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8050
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8050
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        resources:
+          requests:
+            memory: 128Mi
+            cpu: 100m
+          limits:
+            memory: 256Mi
+            cpu: 500m
+      hostAliases:
+      - ip: 172.21.0.1
+        hostnames:
+        - host.k3d.internal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: core-agent
+  namespace: default
+spec:
+  type: ClusterIP
+  selector:
+    app: core-agent
+  ports:
+  - port: 8050
+    targetPort: http
+    name: http

@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+sse-starlette
+psycopg2-binary
+pyyaml
+httpx

@@ -1,0 +1,72 @@
+{{- if .Values.deploy.enabled }}
+{{- $name := include "mcpfinder.componentName" (dict "ctx" . "component" "deploy") }}
+{{- $registry := include "mcpfinder.componentName" (dict "ctx" . "component" "registry") }}
+{{- $router := include "mcpfinder.componentName" (dict "ctx" . "component" "router") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: deploy
+    app: {{ $name }}
+spec:
+  replicas: {{ .Values.deploy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "deploy") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "deploy") | nindent 8 }}
+        part-of: mcpfinder
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: deploy
+          image: {{ include "mcpfinder.image" (dict "ctx" . "svc" .Values.deploy) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.deploy.port }}
+              name: http
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: DATABASE_URL
+            - name: REGISTRY_URL
+              value: "http://{{ $registry }}:{{ .Values.registry.port }}"
+            - name: RUNTIME_URL
+              value: "http://{{ $router }}:{{ .Values.router.port }}"
+          readinessProbe:
+            httpGet: { path: /ready, port: {{ .Values.deploy.port }} }
+            initialDelaySeconds: 8
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.deploy.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: deploy
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "deploy") | nindent 4 }}
+  ports:
+    - port: {{ .Values.deploy.port }}
+      targetPort: http
+      name: http
+{{- end }}

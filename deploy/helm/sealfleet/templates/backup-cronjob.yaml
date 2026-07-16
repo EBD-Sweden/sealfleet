@@ -1,0 +1,133 @@
+{{- if .Values.backup.enabled }}
+# Encrypted, rotated logical backup of the platform Postgres (SOC2 A1.2).
+# Mirrors k8s/backup-cronjob.yaml + scripts/backup-postgres.sh. Restore tests
+# must be performed periodically and evidenced (restore is never automated).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-backup
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+type: Opaque
+stringData:
+  DATABASE_URL: {{ include "mcpfinder.databaseUrl" . | quote }}
+  BACKUP_ENCRYPTION_KEY: {{ .Values.backup.encryptionKey | quote }}
+  {{- if .Values.backup.s3Uri }}
+  BACKUP_S3_URI: {{ .Values.backup.s3Uri | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-backup-script
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+data:
+  backup-postgres.sh: |
+    #!/usr/bin/env bash
+    # Encrypted, rotated logical backup of the Sealfleet platform Postgres (SOC2 A1.2).
+    set -euo pipefail
+    : "${BACKUP_ENCRYPTION_KEY:?BACKUP_ENCRYPTION_KEY is required (do not hardcode)}"
+    DB_URL="${DATABASE_URL:?DATABASE_URL is required}"
+    BACKUP_DIR="${BACKUP_DIR:-/backups}"
+    RETENTION_DAYS="${RETENTION_DAYS:-30}"
+    mkdir -p "$BACKUP_DIR"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    base="mcpfinder-${stamp}.dump"
+    enc="${BACKUP_DIR}/${base}.enc"
+    echo "[backup] dumping database -> ${enc}"
+    pg_dump --dbname="$DB_URL" -Fc \
+      | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_ENCRYPTION_KEY -out "$enc"
+    sha256sum "$enc" > "${enc}.sha256"
+    echo "[backup] wrote $(du -h "$enc" | cut -f1) + checksum"
+    if [ -n "${BACKUP_S3_URI:-}" ]; then
+      echo "[backup] uploading to ${BACKUP_S3_URI}"
+      aws s3 cp "$enc" "${BACKUP_S3_URI%/}/${base}.enc"
+      aws s3 cp "${enc}.sha256" "${BACKUP_S3_URI%/}/${base}.enc.sha256"
+    fi
+    echo "[backup] pruning backups older than ${RETENTION_DAYS} days"
+    find "$BACKUP_DIR" -name 'mcpfinder-*.dump.enc*' -type f -mtime "+${RETENTION_DAYS}" -delete
+    echo "[backup] done: ${enc}"
+    # RESTORE (run deliberately, never automatically):
+    #   openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_ENCRYPTION_KEY -in <file>.enc \
+    #     | pg_restore --clean --if-exists --dbname="$DATABASE_URL"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-backups
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.backup.persistence.storageClass }}
+  storageClassName: {{ .Values.backup.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-postgres-backup
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+          containers:
+            - name: backup
+              image: {{ .Values.backup.image | quote }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  apk add --no-cache openssl bash >/dev/null 2>&1 || true
+                  bash /scripts/backup-postgres.sh
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "mcpfinder.fullname" . }}-backup
+                      key: DATABASE_URL
+                - name: BACKUP_ENCRYPTION_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "mcpfinder.fullname" . }}-backup
+                      key: BACKUP_ENCRYPTION_KEY
+                {{- if .Values.backup.s3Uri }}
+                - name: BACKUP_S3_URI
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "mcpfinder.fullname" . }}-backup
+                      key: BACKUP_S3_URI
+                {{- end }}
+                - name: RETENTION_DAYS
+                  value: {{ .Values.backup.retentionDays | quote }}
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts }
+                - { name: backups, mountPath: /backups }
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ include "mcpfinder.fullname" . }}-backup-script
+                defaultMode: 0755
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ include "mcpfinder.fullname" . }}-backups
+{{- end }}

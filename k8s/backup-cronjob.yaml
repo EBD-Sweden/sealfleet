@@ -1,0 +1,60 @@
+# SOC2 A1.2: scheduled encrypted backup of the platform Postgres.
+# Requires a Secret `mcpfinder-backup` with keys: DATABASE_URL, BACKUP_ENCRYPTION_KEY
+# (and optionally AWS creds + BACKUP_S3_URI for offsite copies).
+# Restore tests must be performed periodically and evidenced (do not automate restore).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mcpfinder-postgres-backup
+  labels:
+    app.kubernetes.io/part-of: mcpfinder
+spec:
+  schedule: "0 2 * * *"            # daily 02:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+          containers:
+            - name: backup
+              image: postgres:16-alpine
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  apk add --no-cache openssl bash >/dev/null 2>&1 || true
+                  bash /scripts/backup-postgres.sh
+              env:
+                - name: DATABASE_URL
+                  valueFrom: { secretKeyRef: { name: mcpfinder-backup, key: DATABASE_URL } }
+                - name: BACKUP_ENCRYPTION_KEY
+                  valueFrom: { secretKeyRef: { name: mcpfinder-backup, key: BACKUP_ENCRYPTION_KEY } }
+                - name: RETENTION_DAYS
+                  value: "30"
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts }
+                - { name: backups, mountPath: /backups }
+          volumes:
+            - name: scripts
+              configMap: { name: mcpfinder-backup-script, defaultMode: 0755 }
+            - name: backups
+              persistentVolumeClaim: { claimName: mcpfinder-backups }
+---
+# PVC for local backup retention (offsite copy via BACKUP_S3_URI recommended).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mcpfinder-backups
+  labels:
+    app.kubernetes.io/part-of: mcpfinder
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

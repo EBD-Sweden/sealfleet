@@ -1,0 +1,261 @@
+# Default values for the mcpfinder chart.
+# Prod-leaning defaults: REQUIRE_AUTH=true, no ephemeral keys, TLS on.
+# Override per environment with `-f my-values.yaml` or `--set`.
+
+# -- Override the chart name (templates use this for resource names).
+nameOverride: ""
+# -- Fully override the release-prefixed name.
+fullnameOverride: ""
+
+# Container images. All four services default to the same repo with
+# per-service image names; override tag (or full repository) per environment.
+image:
+  # -- Registry + org prefix. CI publishes ghcr.io/ebd-sweden/sealfleet-<service>.
+  registry: ghcr.io/ebd-sweden
+  # -- Image tag applied to all services unless overridden per service. Pin to a
+  #    released version; `latest` is only published from the default branch.
+  tag: "0.1.0"
+  # -- Optional immutable digest (e.g. "sha256:...") applied to all services;
+  #    overrides tag. Per-service override via <svc>.digest.
+  digest: ""
+  # -- imagePullPolicy for all services.
+  pullPolicy: IfNotPresent
+
+# -- Names of pre-created imagePullSecrets (for private registries).
+imagePullSecrets: []
+#  - name: ghcr-pull-secret
+
+# ---------------------------------------------------------------------------
+# Secrets. By default the chart creates a Secret STUB with placeholder values
+# so the stack renders/deploys; you MUST override these for any real use.
+# For production, prefer secrets.create=false and reference an externally
+# managed Secret (sealed-secrets, External Secrets Operator, SOPS, Vault,
+# cloud Secrets Manager via CSI driver, or Terraform-provisioned).
+# ---------------------------------------------------------------------------
+secrets:
+  # -- Create the platform Secret from the values below (stub). Set false to
+  #    BYO an existing Secret with the same keys (see secrets.existingSecret).
+  create: true
+  # -- Name of an existing Secret to consume instead of creating one.
+  #    Must contain: DATABASE_URL, ENCRYPTION_KEY, ROUTER_RS256_PRIVATE_KEY,
+  #    NEXTAUTH_SECRET.
+  existingSecret: ""
+
+  # CHANGE-ME placeholders — never ship these to production.
+  # -- Postgres connection string. Ignored when postgresql.enabled=true
+  #    (the in-cluster DB URL is computed and injected automatically).
+  databaseUrl: "postgresql://mcpfinder:CHANGE_ME@db-host:5432/mcpfinder?sslmode=require"
+  # -- Fernet key used by the broker to encrypt sealed inputs / credentials.
+  #    Generate: python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
+  encryptionKey: "CHANGE_ME_GENERATE_A_FERNET_KEY"
+  # -- RS256 private key (PEM) the router uses to sign capability tokens.
+  #    Generate: openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+  routerRs256PrivateKey: |
+    CHANGE_ME_REPLACE_WITH_PEM_PRIVATE_KEY
+  # -- NextAuth session secret for the portal. Generate: openssl rand -base64 32
+  nextauthSecret: "CHANGE_ME_GENERATE_A_RANDOM_SECRET"
+
+# ---------------------------------------------------------------------------
+# Postgres. Toggle between an in-cluster eval Postgres and an external managed
+# database (RDS / Cloud SQL). PRODUCTION: use external managed Postgres.
+# ---------------------------------------------------------------------------
+postgresql:
+  # -- Run an in-cluster Postgres (StatefulSet). For EVALUATION only.
+  #    Set false in production and point secrets.databaseUrl at managed Postgres.
+  enabled: false
+  image: postgres:16-alpine
+  # Credentials/db for the in-cluster instance (only used when enabled=true).
+  auth:
+    username: mcpfinder
+    password: CHANGE_ME_INCLUSTER_DB_PASSWORD
+    database: mcpfinder
+  # -- sslmode appended to the computed in-cluster DATABASE_URL.
+  sslmode: disable
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# ---------------------------------------------------------------------------
+# DB migrate/seed Job. Runs once on install/upgrade as a Helm hook.
+# It clones the repo (to obtain db/migrations/*.sql, db/seeds/*, and
+# scripts/001_create_api_keys.sql), then applies them with psql. This keeps
+# the chart self-contained without baking SQL into the chart or images.
+# ---------------------------------------------------------------------------
+migrate:
+  # -- Run the migrate/seed Job. Disable if you manage schema out-of-band.
+  enabled: true
+  image: postgres:16-alpine
+  # Source of the SQL assets. Pin gitRef to the same version as image.tag.
+  git:
+    repo: "https://github.com/EBD-Sweden/sealfleet.git"
+    ref: "main"
+    # -- alpine/git image used by the clone init container.
+    image: "alpine/git:latest"
+  # -- Apply seed files (db/seeds/*) in addition to migrations. Seeds include a
+  #    demo sandbox + a local-dev operator API key; you may want this OFF in
+  #    locked-down production and instead provision keys via the portal/API.
+  applySeeds: false
+  # -- Helm hook weight; lower runs earlier.
+  hookWeight: "0"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Per-service configuration. Each has replicas, resources, and image overrides.
+# ---------------------------------------------------------------------------
+
+registry:
+  enabled: true
+  imageName: sealfleet-registry
+  tag: ""            # falls back to image.tag
+  replicas: 2
+  port: 8010
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+deploy:
+  enabled: true
+  imageName: sealfleet-deploy
+  tag: ""
+  replicas: 1        # the deploy/control service is intentionally single-writer
+  port: 8030
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: "1",  memory: 512Mi }
+
+router:
+  enabled: true
+  imageName: sealfleet-runtime
+  tag: ""
+  replicas: 2
+  port: 8040
+  # Prod-leaning router auth posture.
+  requireAuth: true
+  allowEphemeralKeys: false
+  # -- Optional extra env (e.g. LLM_BASE_URL, LLM_MODEL, ENDPOINT_OVERRIDES,
+  #    K8S_SCALE_TO_ZERO). Provide as a map of name: value.
+  extraEnv: {}
+  #  K8S_SCALE_TO_ZERO: "true"
+  #  MCP_IDLE_TIMEOUT: "300"
+  #  LLM_MODEL: "anthropic/claude-haiku-4-5"
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+portal:
+  enabled: true
+  imageName: sealfleet-portal
+  tag: ""
+  # -- Portal image runs as the node user (uid 1000); override the shared 10001.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  replicas: 2
+  port: 3004
+  # -- Public URL of the portal; used for NEXTAUTH_URL / AUTH_URL. Defaults to
+  #    https://<ingress.hosts.portal> when empty and ingress is enabled.
+  publicUrl: ""
+  extraEnv: {}
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 512Mi }
+
+# ---------------------------------------------------------------------------
+# Ingress + TLS. Reuses the k8s/tls/ patterns (Traefik by default; works with
+# nginx/ALB/GCE by overriding className + annotations). One host per service.
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: traefik
+  # -- TLS Secret name. With cert-manager set tls.certManager.enabled=true and
+  #    leave this; cert-manager will provision it.
+  tlsSecretName: mcpfinder-tls
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+  hosts:
+    portal: portal.sealfleet.local
+    router: router.sealfleet.local
+    deploy: deploy.sealfleet.local
+    registry: registry.sealfleet.local
+  tls:
+    enabled: true
+    # cert-manager integration (mirrors k8s/tls/cert-manager-prod.yaml).
+    certManager:
+      enabled: false
+      # -- ClusterIssuer name (e.g. letsencrypt-prod).
+      clusterIssuer: letsencrypt-prod
+
+# ---------------------------------------------------------------------------
+# NetworkPolicies (defense-in-depth; enforced only on a policy-aware CNI).
+# Mirrors k8s/tls/networkpolicy.yaml.
+# ---------------------------------------------------------------------------
+networkPolicy:
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# Encrypted Postgres backup CronJob. Mirrors k8s/backup-cronjob.yaml.
+# ---------------------------------------------------------------------------
+backup:
+  enabled: true
+  schedule: "0 2 * * *"          # daily 02:00 UTC
+  image: postgres:16-alpine
+  retentionDays: "30"
+  # -- BYO encryption key (passphrase). If empty a stub is created — replace it.
+  encryptionKey: "CHANGE_ME_BACKUP_ENCRYPTION_KEY"
+  # -- Optional offsite object-storage target (e.g. s3://bucket/prefix).
+  s3Uri: ""
+  persistence:
+    size: 20Gi
+    storageClass: ""
+
+# ---------------------------------------------------------------------------
+# RBAC for the router's scale-to-zero ScaleManager (mirrors k8s/router-rbac.yaml).
+# ---------------------------------------------------------------------------
+rbac:
+  # -- Create ServiceAccount + Role/RoleBinding granting the router scale rights.
+  create: true
+
+# -- Pod security context applied to all app workloads (uid 10001 matches the
+#    runtime/registry/deploy/agent images; portal overrides to 1000 below).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context applied to all app containers.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+  # readOnlyRootFilesystem is not enabled by default: the router persists
+  # generated pipeline docs to its image filesystem. Enable per-deployment once
+  # a writable volume is mounted (see the chart README hardening notes).
+  readOnlyRootFilesystem: false
+
+# -- Common labels/annotations merged onto all resources.
+commonLabels: {}
+commonAnnotations: {}

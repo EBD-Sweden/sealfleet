@@ -1,0 +1,247 @@
+# Sealfleet — one-command local stack.
+#
+#   docker compose up --build
+#
+# Brings up Postgres + (auto) keys/migrations/seeds + registry + deploy + router +
+# portal + a live demo MCP. Open the portal at http://localhost:3004 and log in as
+# admin@sealfleet.io with ADMIN_INITIAL_PASSWORD (default "admin" — change it below).
+# The runtime API is http://localhost:8040 . A seeded local-dev operator API key is
+# created (see scripts/001_create_api_keys.sql); connect your own IdP (OIDC) and
+# design roles/permissions in the portal: Admin → Tenants.
+#
+# Auth keys (RS256 signing keys, NextAuth secret, encryption key) are generated
+# once by the `keygen` service into the sealfleet_keys volume and reused on every
+# restart, so sessions and portal↔router trust survive container/host restarts.
+#
+# This is a LOCAL/DEV launch. For production set strong secrets (DB password,
+# ADMIN_INITIAL_PASSWORD, your own keys), enable TLS (see k8s/tls/), and use real
+# Postgres.
+
+name: mcpfinder
+
+x-db-url: &db_url "postgresql://admin:admin@db:5432/mcpfinder"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: mcpfinder
+    ports:
+      - "54323:5432"          # host:container — change if 54323 is taken
+    volumes:
+      - mcpfinder_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d mcpfinder"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: generate persistent auth keys into the sealfleet_keys volume if they
+  # don't exist yet. Idempotent — keys are created once and survive restarts, so
+  # portal sessions and router JWT validation keep working across reboots.
+  keygen:
+    build: {context: ./runtime}   # reuses the router image (python + cryptography); no extra pull
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        import base64, os, secrets
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        def gen_rsa(path):
+            if os.path.exists(path):
+                return
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            pem = key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+            with open(path, "wb") as f:
+                f.write(pem)
+
+        def gen_secret(path):
+            if os.path.exists(path):
+                return
+            with open(path, "w") as f:
+                f.write(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())
+
+        gen_rsa("/keys/portal-rs256.pem")
+        gen_rsa("/keys/router-rs256.pem")
+        gen_secret("/keys/nextauth-secret")
+        gen_secret("/keys/encryption-key")
+        for name in os.listdir("/keys"):
+            os.chmod(os.path.join("/keys", name), 0o600)
+        print("auth keys ready")
+    volumes:
+      - sealfleet_keys:/keys
+    restart: "no"
+
+  # One-shot: apply all migrations + seeds, then exit. Idempotent (IF NOT EXISTS).
+  # Also bootstraps the first admin login: sets the seeded admin user's password to
+  # ADMIN_INITIAL_PASSWORD only if no password is set yet (never overwrites).
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      PGPASSWORD: admin
+      # First-login password for admin@sealfleet.io. CHANGE THIS for any
+      # deployment reachable by others; rotate via the portal after first login.
+      ADMIN_INITIAL_PASSWORD: "admin"
+    volumes:
+      - ./db:/db:ro
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in /db/migrations/*.sql; do echo "migrate: $$f"; psql -h db -U admin -d mcpfinder -v ON_ERROR_STOP=1 -f "$$f"; done
+        for f in /db/seeds/*.sql /scripts/001_create_api_keys.sql; do echo "seed: $$f"; psql -h db -U admin -d mcpfinder -f "$$f"; done
+        if [ -n "$${ADMIN_INITIAL_PASSWORD}" ]; then
+          psql -h db -U admin -d mcpfinder -v ON_ERROR_STOP=1 \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" \
+            -c "UPDATE users SET password_hash = crypt(\$$mfpw\$$$${ADMIN_INITIAL_PASSWORD}\$$mfpw\$$, gen_salt('bf', 10)) WHERE email = 'admin@sealfleet.io' AND password_hash IS NULL;"
+        fi
+        echo "migrations + seeds complete"
+    restart: "no"
+
+  registry:
+    build: {context: ./registry}
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: *db_url
+    ports: ["8010:8010"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8010/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  deploy:
+    build: {context: ./deploy}
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      registry: {condition: service_started}
+    environment:
+      DATABASE_URL: *db_url
+      REGISTRY_URL: "http://registry:8010"
+    ports: ["8030:8030"]
+
+  router:
+    build: {context: ./runtime}
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      keygen: {condition: service_completed_successfully}
+      registry: {condition: service_started}
+    environment:
+      DATABASE_URL: *db_url
+      REGISTRY_URL: "http://registry:8010"
+      REQUIRE_AUTH: "true"
+      # Where to fetch the portal's JWKS for user-JWT validation.
+      PORTAL_URL: "http://portal:3004"
+    volumes:
+      - sealfleet_keys:/keys:ro
+    # Load persistent signing/encryption keys generated by `keygen`, then start
+    # the normal entrypoint. Persistent keys (vs ephemeral) keep issued tokens
+    # and encrypted-at-rest data valid across restarts.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export ROUTER_RS256_PRIVATE_KEY="$$(cat /keys/router-rs256.pem)"
+        export ENCRYPTION_KEY="$$(cat /keys/encryption-key)"
+        exec ./entrypoint.sh
+    ports: ["8040:8040"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8040/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  portal:
+    build: {context: ./portal}
+    restart: unless-stopped
+    depends_on:
+      router: {condition: service_started}
+      keygen: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: *db_url
+      RUNTIME_URL: "http://router:8040"
+      REGISTRY_URL: "http://registry:8010"
+      DEPLOY_URL: "http://deploy:8030"
+      NODE_ENV: "production"
+      # Browser-visible base URL — used for session callbacks and to build the
+      # OIDC redirect_uri handed to your IdP. Change if you remap the port.
+      NEXTAUTH_URL: "http://localhost:3004"
+      AUTH_URL: "http://localhost:3004"
+      # Server key the portal uses when proxying calls to the router. The seeded
+      # local-dev key carries allow_identity_delegation, so the router attributes
+      # calls (and audit rows) to the actual logged-in user and tenant.
+      RUNTIME_API_KEY: "loHPxndS1CBmn-dLHBZwvliXV7ixPyWU_5hlZo-VwpA"
+    volumes:
+      - sealfleet_keys:/keys:ro
+    # Load the persistent RS256 signing key + NextAuth secret generated by
+    # `keygen` (the portal refuses ephemeral keys under NODE_ENV=production),
+    # then start the standalone Next.js server.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export NEXTAUTH_RS256_PRIVATE_KEY="$$(cat /keys/portal-rs256.pem)"
+        export NEXTAUTH_SECRET="$$(cat /keys/nextauth-secret)"
+        exec node server.js
+    ports: ["3004:3004"]
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3004/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # Live demo MCP so the catalog has an invocable tool out of the box (fake data
+  # only — see mcps/demo_sandbox). The network alias matches the endpoint in
+  # runtime/manifests/demo-sandbox-mcp.yaml, which k8s deployments also use.
+  demo-sandbox-mcp:
+    build: {context: ./runtime}
+    restart: unless-stopped
+    working_dir: /workspace
+    volumes:
+      - ./mcps:/workspace/mcps:ro
+    command: ["python", "-m", "uvicorn", "mcps.demo_sandbox.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    networks:
+      default:
+        aliases:
+          - demo-sandbox-mcp.demo-sandbox.svc.cluster.local
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8080/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Public example MCP: weather trip planner (real key-less weather data via
+  # Open-Meteo with a met.no fallback). Backs the portal's /weather-trip page —
+  # the reference example for "run a pipeline, then visualize the results".
+  # Service name matches the endpoint in runtime/manifests/weather-trip-mcp.yaml.
+  weather-trip-mcp:
+    build: {context: ./runtime}
+    restart: unless-stopped
+    working_dir: /workspace
+    volumes:
+      - ./mcps:/workspace/mcps:ro
+    command: ["python", "-m", "uvicorn", "mcps.weather_trip.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8080/health')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  mcpfinder_pgdata:
+  sealfleet_keys:

@@ -1,0 +1,69 @@
+{{- if .Values.registry.enabled }}
+{{- $name := include "mcpfinder.componentName" (dict "ctx" . "component" "registry") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+    app: {{ $name }}
+spec:
+  replicas: {{ .Values.registry.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "registry") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "registry") | nindent 8 }}
+        part-of: mcpfinder
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: registry
+          image: {{ include "mcpfinder.image" (dict "ctx" . "svc" .Values.registry) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.registry.port }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: DATABASE_URL
+          readinessProbe:
+            httpGet: { path: /ready, port: {{ .Values.registry.port }} }
+            initialDelaySeconds: 8
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.registry.port }} }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.registry.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+  ports:
+    - port: {{ .Values.registry.port }}
+      targetPort: {{ .Values.registry.port }}
+      name: http
+{{- end }}

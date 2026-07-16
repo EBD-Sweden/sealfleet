@@ -1,0 +1,22 @@
+# Accepted IaC findings (reviewed) — see deploy/terraform/aws/README.md.
+#
+# AWS-0040 / AWS-0041 — EKS public endpoint. Our module makes the public
+#   endpoint OPTIONAL (cluster_endpoint_public_access, default true) and, when
+#   enabled, MANDATORY-CIDR-restricted: a terraform precondition refuses an
+#   empty CIDR list and a variable validation refuses 0.0.0.0/0. Set
+#   cluster_endpoint_public_access=false for a fully private cluster. Trivy
+#   analyzes the community module's static default and cannot see the runtime
+#   guard, so it flags the module file regardless.
+AVD-AWS-0040
+AVD-AWS-0041
+# AWS-0104 — the EKS managed node group's egress. Worker nodes MUST reach the
+#   internet (pull images, AWS APIs, OIDC) — this egress is required and lives
+#   in the upstream terraform-aws-eks module, not our code. The RDS security
+#   group we own has no unrestricted egress.
+AVD-AWS-0104
+# KSV-0014 — readOnlyRootFilesystem. Containers run non-root with dropped caps
+#   and no privilege escalation; readOnlyRootFilesystem is a documented opt-in
+#   (containerSecurityContext.readOnlyRootFilesystem) rather than a default,
+#   because the router persists generated pipeline docs to its image FS. Enable
+#   it per-deployment after mounting writable volumes (chart README).
+AVD-KSV-0014

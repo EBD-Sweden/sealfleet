@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-sandbox
+  labels:
+    app.kubernetes.io/part-of: mcpfinder-demo-sandbox
+    sealfleet.io/tenant: demo-sandbox
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-sandbox-mcp
+  namespace: demo-sandbox
+  labels:
+    app.kubernetes.io/name: demo-sandbox-mcp
+    app.kubernetes.io/part-of: mcpfinder-demo-sandbox
+    sealfleet.io/tenant: demo-sandbox
+    sealfleet.io/workspace: demo-external-evaluation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-sandbox-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-sandbox-mcp
+        app.kubernetes.io/part-of: mcpfinder-demo-sandbox
+        sealfleet.io/tenant: demo-sandbox
+        sealfleet.io/workspace: demo-external-evaluation
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: demo-sandbox-mcp
+          image: mcpfinder/demo-sandbox-mcp:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-sandbox-mcp
+  namespace: demo-sandbox
+  labels:
+    app.kubernetes.io/name: demo-sandbox-mcp
+    app.kubernetes.io/part-of: mcpfinder-demo-sandbox
+spec:
+  selector:
+    app.kubernetes.io/name: demo-sandbox-mcp
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: demo-sandbox-mcp-egress-deny
+  namespace: demo-sandbox
+  labels:
+    app.kubernetes.io/part-of: mcpfinder-demo-sandbox
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: demo-sandbox-mcp
+  policyTypes:
+    - Egress
+  egress: []

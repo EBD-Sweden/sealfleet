@@ -1,0 +1,44 @@
+# Changelog
+
+All notable changes to Sealfleet are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims
+to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] — Initial public release
+
+First open-source release of the Sealfleet MCP Agent Platform.
+
+### Platform
+- Runtime Router (FastAPI): `/call` tool invoke, typed / named / v2 YAML
+  pipelines, async jobs, manifests, channels, scale-to-zero, and the
+  `mcpfinder` CLI.
+- Registry (discovery), Deploy service (git → Kubernetes), Core Agent
+  (LLM natural-language → pipeline execution), Portal (Next.js: catalog,
+  test console, deploy UI, pipeline visualization, sealed-input flows).
+- Two reference examples: the fake-data demo sandbox and the Weather Trip
+  Planner (build a pipeline → visualize results).
+
+### Security & tenancy
+- Credentials never reach the LLM: `{{credential:name}}` tokens resolve at
+  MCP-call time, tenant-scoped, across k8s Secret / BYOK / platform-AES modes.
+- Per-tenant isolation, RBAC with IdP group→role mapping, per-tool grants,
+  manifest-declared access gates and PII redaction.
+- Tamper-evident audit hash chain with GDPR purpose / lawful-basis tagging,
+  DSAR export, right-to-erasure, scheduled retention.
+- SSRF-guarded outbound endpoints, path-traversal-safe pipeline deploy,
+  authenticated deploy/registry services, CORS allowlist, non-root containers.
+- Supply chain: SBOM (CycloneDX + SPDX) and keyless cosign signing per image;
+  CI secret/dependency/SAST/IaC scanning.
+
+### Deploy (bring your own cloud)
+- Helm chart (`deploy/helm/sealfleet`) for any Kubernetes cluster.
+- AWS Terraform (`deploy/terraform/aws`): one `terraform apply` provisions
+  VPC + EKS + RDS Postgres + KMS + Secrets Manager + ALB and installs the
+  chart. Validated with `terraform plan` against a live account.
+- GCP Terraform (`deploy/terraform/gcp`): GKE + Cloud SQL equivalent.
+- Docker Compose one-command local quickstart.
+
+[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.1.0

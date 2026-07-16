@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+sse-starlette
+psycopg2-binary
+pyyaml
+httpx
+kubernetes
+pytest
+pytest-asyncio
+anyio[trio]
+cryptography>=41.0.0
+PyJWT[cryptography]>=2.8.0
+python-multipart>=0.0.6

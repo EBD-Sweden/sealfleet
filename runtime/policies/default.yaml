@@ -1,0 +1,37 @@
+# Sealfleet Policy Engine — default policy
+# Rules are evaluated top-to-bottom; first match wins.
+# If no rule matches: default is "allow"
+
+version: "1"
+
+rules:
+  # Deny obviously destructive tool names (defense in depth)
+  - id: block-delete-tools
+    match:
+      tool_pattern: "delete_*"
+    action: deny
+    reason: "Destructive tools require explicit policy allowlist"
+
+  # Require confirmation for any trade/execute tool
+  - id: require-confirm-trades
+    match:
+      tool_pattern: "execute_*"
+    action: require_confirm
+    reason: "Execution tools require user confirmation"
+
+  # Allow all read/query tools freely
+  - id: allow-read-tools
+    match:
+      tool_pattern: "get_*"
+    action: allow
+
+  - id: allow-read-tools-2
+    match:
+      tool_pattern: "list_*"
+    action: allow
+
+  # Default catch-all: allow (remove to default-deny)
+  - id: default-allow
+    match:
+      tool_pattern: "*"
+    action: allow

@@ -1,0 +1,44 @@
+{{- if .Values.rbac.create }}
+{{- $name := include "mcpfinder.componentName" (dict "ctx" . "component" "router") }}
+# ServiceAccount + Role/RoleBinding for the router's scale-to-zero ScaleManager.
+# Mirrors k8s/router-rbac.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-sa
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-scaler
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-router-scaler
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}-sa
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "mcpfinder.fullname" . }}-scaler
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

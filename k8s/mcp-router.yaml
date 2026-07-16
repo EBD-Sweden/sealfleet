@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-router
+  namespace: default
+  labels:
+    app: mcp-router
+    part-of: mcpfinder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-router
+  template:
+    metadata:
+      labels:
+        app: mcp-router
+    spec:
+      serviceAccountName: mcp-router-sa
+      containers:
+        - name: mcp-router
+          image: mcpfinder-registry:5050/mcp-router:latest
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8040
+          envFrom:
+            - secretRef:
+                name: mcpfinder-database
+            - secretRef:
+                name: mcpfinder-runtime-auth
+            - secretRef:
+                name: mcpfinder-llm
+          env:
+            - name: ENDPOINT_OVERRIDES
+              value: '{}'
+            - name: K8S_SCALE_TO_ZERO
+              value: "true"
+            - name: MCP_IDLE_TIMEOUT
+              value: "300"
+            - name: REQUIRE_AUTH
+              value: "true"
+            - name: MCPFINDER_DEPLOYMENT_ENV
+              value: "public-test"
+            - name: AUTH_ALLOW_EPHEMERAL_KEYS
+              value: "false"
+            - name: DOCKER_STDIO_ENABLED
+              value: "false"
+            - name: LLM_BASE_URL
+              value: "http://host.k3d.internal:3456/v1"
+            - name: LLM_MODEL
+              value: "anthropic/claude-haiku-4-5"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8040
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8040
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-router
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: mcp-router
+  ports:
+    - port: 8040
+      targetPort: 8040
+      nodePort: 30040

@@ -1,0 +1,137 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $router := include "mcpfinder.componentName" (dict "ctx" . "component" "router") }}
+{{- $deploy := include "mcpfinder.componentName" (dict "ctx" . "component" "deploy") }}
+{{- $registry := include "mcpfinder.componentName" (dict "ctx" . "component" "registry") }}
+{{- $portal := include "mcpfinder.componentName" (dict "ctx" . "component" "portal") }}
+# Defense-in-depth NetworkPolicies (SOC 2 CC6.6/CC6.7). Mirrors
+# k8s/tls/networkpolicy.yaml. Enforced ONLY on a policy-aware CNI (Calico/
+# Cilium); a no-op on flannel. Egress is left open (DNS + external DB + APIs).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-default-deny-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchExpressions:
+      - key: part-of
+        operator: In
+        values: ["mcpfinder"]
+  policyTypes: ["Ingress"]
+  ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-allow-router-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $router }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: {{ $portal }} } }
+        - podSelector: { matchLabels: { app: {{ $deploy }} } }
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: {{ .Values.router.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-allow-deploy-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $deploy }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: {{ $portal }} } }
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: {{ .Values.deploy.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-allow-registry-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $registry }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: {{ $router }} } }
+        - podSelector: { matchLabels: { app: {{ $deploy }} } }
+        - podSelector: { matchLabels: { app: {{ $portal }} } }
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: {{ .Values.registry.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-allow-portal-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $portal }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: {{ .Values.portal.port }}
+{{- if .Values.postgresql.enabled }}
+---
+# In-cluster Postgres must accept connections from platform pods + the migrate
+# Job (otherwise the default-deny above orphans it on an enforcing CNI).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-allow-postgresql-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ include "mcpfinder.postgresName" . }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: part-of, operator: In, values: ["mcpfinder"] }
+      ports:
+        - { protocol: TCP, port: 5432 }
+{{- end }}
+{{- end }}

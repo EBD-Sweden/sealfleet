@@ -1,0 +1,12 @@
+channels:
+  - name: demo.invoice.summary
+    description: Fake-data invoice summaries from the demo sandbox MCP
+    publishers: [demo-sandbox-mcp]
+    subscribers: []  # final output channel, no downstream consumers
+    ttl_seconds: 300
+
+  - name: demo.vendor.score
+    description: Fake-data vendor scores from the demo sandbox MCP
+    publishers: [demo-sandbox-mcp]
+    subscribers: []  # final output channel, no downstream consumers
+    ttl_seconds: 300

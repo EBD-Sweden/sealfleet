@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-deploy
+  namespace: default
+  labels:
+    app: mcp-deploy
+    part-of: mcpfinder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-deploy
+  template:
+    metadata:
+      labels:
+        app: mcp-deploy
+    spec:
+      hostAliases:
+      - ip: 172.21.0.1
+        hostnames:
+        - host.k3d.internal
+      containers:
+      - name: mcp-deploy
+        image: mcpfinder-registry:5050/mcp-deploy:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8030
+          name: http
+        envFrom:
+        - secretRef:
+            name: mcpfinder-database
+        env:
+        - name: RUNTIME_URL
+          value: http://mcp-router:8040
+        - name: REGISTRY_URL
+          value: http://mcp-registry:8010
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8030
+          initialDelaySeconds: 8
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: 128Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 1000m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-deploy
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: mcp-deploy
+  ports:
+  - port: 8030
+    targetPort: http
+    nodePort: 30030
+    name: http

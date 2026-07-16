@@ -1,0 +1,40 @@
+# Public example pipeline: gather → score → visualize.
+#
+# Fetches real daily weather (past week + next ~10 days) for a list of cities,
+# then deterministically ranks them against trip preferences. The portal's
+# /weather-trip page runs this pipeline and visualizes the result — it is the
+# reference example for "build a pipeline, then visualize its output".
+name: weather_trip_planner
+version: 2
+inputs:
+  cities:
+    type: list
+    default: ["Stockholm", "Barcelona", "Lisbon", "Rome", "Nice"]
+    description: City names to compare (max 8)
+  target_temp_c:
+    type: number
+    default: 27
+    description: Ideal daytime max temperature
+  max_wind_kph:
+    type: number
+    default: 20
+    description: Maximum comfortable wind speed
+expected_output:
+  weather: per-city daily records (past week + forecast)
+  ranking: cities ordered by trip score with per-day scores
+steps:
+  - id: fetch
+    mcp: weather-trip-mcp
+    tool: fetch_cities_weather
+    inputs:
+      cities: "{{inputs.cities}}"
+  - id: rank
+    mcp: weather-trip-mcp
+    tool: rank_cities
+    inputs:
+      weather: "{{steps.fetch.output}}"
+      target_temp_c: "{{inputs.target_temp_c}}"
+      max_wind_kph: "{{inputs.max_wind_kph}}"
+output:
+  weather: "{{steps.fetch.output}}"
+  ranking: "{{steps.rank.output}}"

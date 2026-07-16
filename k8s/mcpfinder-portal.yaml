@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcpfinder-portal
+  namespace: default
+  labels:
+    app: mcpfinder-portal
+    part-of: mcpfinder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcpfinder-portal
+  template:
+    metadata:
+      labels:
+        app: mcpfinder-portal
+    spec:
+      containers:
+        - name: mcpfinder-portal
+          image: mcpfinder-registry:5050/mcpfinder-portal:latest
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 3004
+          envFrom:
+            - secretRef:
+                name: mcpfinder-database
+            - secretRef:
+                name: mcpfinder-portal-auth
+          env:
+            - name: PORT
+              value: "3004"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: REGISTRY_URL
+              value: "http://mcp-registry:8010"
+            - name: RUNTIME_URL
+              value: "http://mcp-router:8040"
+            - name: DEPLOY_URL
+              value: "http://mcp-deploy:8030"
+            - name: AGENT_URL
+              value: "http://core-agent:8050"
+            - name: NEXTAUTH_URL
+              value: "http://localhost:30004"
+            - name: AUTH_URL
+              value: "http://localhost:30004"
+          readinessProbe:
+            httpGet:
+              path: /api/ready
+              port: 3004
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcpfinder-portal
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: mcpfinder-portal
+  ports:
+    - port: 3004
+      targetPort: 3004
+      nodePort: 30004

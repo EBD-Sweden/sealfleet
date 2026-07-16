@@ -1,0 +1,14 @@
+{
+  "artifact_dir": "runtime/generated/demo-fake-crm-mcp",
+  "data_classification": "fake-demo-only",
+  "deploy": "dry_run",
+  "description": "Generated from checked-in fake CRM OpenAPI spec (public demo only).",
+  "name": "demo-fake-crm-mcp",
+  "registered": true,
+  "tenant_id": "demo-sandbox",
+  "tools": [
+    "get_demo_customer"
+  ],
+  "trace_id": "demo-openapi-1b40dd48c3e4",
+  "workspace_id": "demo-external-evaluation"
+}
