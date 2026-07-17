@@ -68,6 +68,15 @@ vi.mock("jose", () => ({
   })),
 }));
 
+// SSO is an Enterprise feature; these tests exercise the SSO behavior, so treat
+// the deployment as licensed for SSO with ample seats.
+vi.mock("@/lib/entitlement", () => ({
+  getEntitlement: vi.fn().mockResolvedValue({
+    tier: "enterprise", features: ["sso", "multi_user"], seats: 1000, customer: "test",
+  }),
+  hasFeature: vi.fn().mockResolvedValue(true),
+}));
+
 describe("SSO authoritative role sync", () => {
   beforeEach(() => {
     vi.resetModules();

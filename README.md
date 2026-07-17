@@ -21,6 +21,11 @@ Sealfleet lets organizations expose internal/external capabilities as agent-call
 - **portal/** — Web UI: docs, catalog, test console, deploy UI, and sealed-input/approval flows
 - **mcps/** — Example MCP servers (demo sandbox, weather trip planner)
 
+## Licensing
+
+Sealfleet is open-core: the platform is free (Apache-2.0); enterprise features
+(SSO/IdP, multi-user/tenant, SCIM) unlock with a license. See **[LICENSING.md](LICENSING.md)**.
+
 ## Deploying
 
 - **Local eval:** `docker compose up --build` (below).
@@ -108,7 +113,7 @@ Expected result: the command prints a JSON receipt with `mode=public_demo`, `ten
 
 ### 2b. Run the Sealfleet CLI smoke path
 
-Sealfleet CLI is the project-specific Command Line Interface for agents/operators: it validates `mcpfinder.cli.config/v1`, checks runtime health, builds `/call` invocation payloads, and calls registry/manifest control-plane APIs. It is intentionally Sealfleet-only and rejects other products config bleed.
+Sealfleet CLI is the project-specific Command Line Interface for agents/operators: it validates `mcpfinder.cli.config/v1`, checks runtime health, builds `/call` invocation payloads, and calls registry/manifest control-plane APIs. It is intentionally Sealfleet-only and rejects Aether/OpenSnow config bleed.
 
 ```bash
 runtime/.venv/bin/python -m runtime.cli --json contract

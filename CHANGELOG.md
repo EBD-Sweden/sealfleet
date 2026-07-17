@@ -6,6 +6,20 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — Open-core licensing
+
+### Added
+- **Open-core licensing / entitlements** (`runtime/licensing.py`): the platform
+  is free; enterprise features (SSO/OIDC/IdP mapping, multi-user / multi-tenant,
+  SCIM, advanced RBAC, audit export) unlock via an Ed25519-signed
+  `SEALFLEET_LICENSE_KEY` (offline-verified) or an AWS Marketplace entitlement.
+  Bad/expired/tampered keys degrade to the free tier.
+- `GET /license` entitlement endpoint; SCIM endpoints return `402` when
+  unlicensed; portal SSO login (`upsertSsoUser`, `/api/sso/start`) gated on the
+  `sso` feature.
+- `scripts/sealfleet-license.py` seller-side key issuer (keygen + mint).
+- `LICENSING.md` documents the model, feature matrix, and how to buy/apply a key.
+
 ## [0.1.0] — Initial public release
 
 First open-source release of the Sealfleet MCP Agent Platform.
@@ -40,5 +54,6 @@ First open-source release of the Sealfleet MCP Agent Platform.
 - GCP Terraform (`deploy/terraform/gcp`): GKE + Cloud SQL equivalent.
 - Docker Compose one-command local quickstart.
 
-[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.2.0
 [0.1.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.1.0

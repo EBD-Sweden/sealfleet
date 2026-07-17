@@ -50,6 +50,7 @@ from policy_hooks import (  # noqa: E402
     RuntimeHookContext,
     build_runtime_hook_manager,
 )
+import licensing  # noqa: E402 — open-core entitlement / feature flags
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -2427,6 +2428,7 @@ async def api_key_auth_middleware(request: Request, call_next):
         or request.url.path == "/.well-known/jwks.json"
         or request.url.path == "/.well-known/oauth-protected-resource"
         or request.url.path == "/enterprise/contract"
+        or request.url.path == "/license"
         or request.url.path == "/token"
         or request.method == "OPTIONS"
     ):
@@ -5869,14 +5871,44 @@ def _scim_sync_group_roles(tenant_id: str, group_id: str, group: dict) -> dict:
     return {"id": group_id, "displayName": display_name, "roles": roles}
 
 
+# ---------------------------------------------------------------------------
+# Licensing / entitlement (open-core)
+# ---------------------------------------------------------------------------
+
+def _require_feature(feature: str) -> None:
+    """402 unless the current license entitles this enterprise feature."""
+    if not licensing.feature_enabled(feature):
+        raise HTTPException(
+            status_code=402,
+            detail=f"'{feature}' requires a Sealfleet Enterprise license. "
+                   f"See GET /license; contact sales to unlock enterprise features.",
+        )
+
+
+@app.get("/license")
+async def get_license():
+    """Public: report the current entitlement (tier + unlocked features).
+
+    Consumed by the portal to gate SSO/multi-user and show the upgrade banner.
+    Never exposes the license key itself.
+    """
+    ent = licensing.resolve_entitlement()
+    return {
+        **ent.to_public_dict(),
+        "enterprise_features": sorted(licensing.ENTERPRISE_FEATURES),
+    }
+
+
 @app.post("/scim/v2/Users", status_code=201)
 async def scim_create_user(body: dict, request: Request):
+    _require_feature(licensing.FEATURE_SCIM)
     _authorize_action(request, "policy.admin")
     return _scim_upsert_user(get_tenant_id(request), body)
 
 
 @app.patch("/scim/v2/Users/{user_id}")
 async def scim_patch_user(user_id: str, body: dict, request: Request):
+    _require_feature(licensing.FEATURE_SCIM)
     _authorize_action(request, "policy.admin")
     tenant_id = get_tenant_id(request)
     if body.get("active") is False:
@@ -5887,6 +5919,7 @@ async def scim_patch_user(user_id: str, body: dict, request: Request):
 
 @app.put("/scim/v2/Groups/{group_id}")
 async def scim_put_group(group_id: str, body: dict, request: Request):
+    _require_feature(licensing.FEATURE_SCIM)
     _authorize_action(request, "policy.admin")
     return _scim_sync_group_roles(get_tenant_id(request), group_id, body)
 

@@ -2,7 +2,7 @@
 
 Sealfleet CLI means the Sealfleet Command Line Interface: a deterministic command-line contract for agents and operators that need to validate Sealfleet-scoped config, check the runtime, invoke MCP tools, and use runtime control-plane APIs.
 
-This CLI is project-specific. It must not use other products, other products, or other board/product names in config or command contracts.
+This CLI is project-specific. It must not use Aether, OpenSnow, or other board/product names in config or command contracts.
 
 ## Contract
 

@@ -59,6 +59,18 @@ spec:
               value: {{ .Values.router.requireAuth | quote }}
             - name: AUTH_ALLOW_EPHEMERAL_KEYS
               value: {{ .Values.router.allowEphemeralKeys | quote }}
+            {{- if .Values.licensing.publicKey }}
+            - name: SEALFLEET_LICENSE_PUBKEY
+              value: {{ .Values.licensing.publicKey | quote }}
+            {{- end }}
+            {{- if .Values.licensing.licenseKey }}
+            - name: SEALFLEET_LICENSE_KEY
+              value: {{ .Values.licensing.licenseKey | quote }}
+            {{- end }}
+            {{- if .Values.licensing.awsMarketplaceProductCode }}
+            - name: SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE
+              value: {{ .Values.licensing.awsMarketplaceProductCode | quote }}
+            {{- end }}
             {{- range $k, $v := .Values.router.extraEnv }}
             - name: {{ $k }}
               value: {{ $v | quote }}

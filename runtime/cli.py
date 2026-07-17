@@ -143,7 +143,7 @@ def _validate_project_markers(data: dict[str, Any], *, target: str) -> None:
     if product != "mcpfinder" or any(marker in name for marker in _CROSS_PROJECT_MARKERS):
         raise CliError(
             "project_scope_violation",
-            "CLI config must be scoped to product=mcpfinder and must not reference other products project surfaces",
+            "CLI config must be scoped to product=mcpfinder and must not reference Aether/OpenSnow project surfaces",
             target=target,
             detail={"product": data.get("product"), "name": data.get("name")},
         )
@@ -280,7 +280,7 @@ def contract_payload() -> dict[str, Any]:
                 "cancel": "POST /jobs/{job_id}/cancel",
             },
             "agent_contract": {
-                "project_scope": "mcpfinder only; no other products CLI naming or config bleed",
+                "project_scope": "mcpfinder only; no Aether/OpenSnow CLI naming or config bleed",
                 "secrets": "never pass raw secrets in prompts or payload logs",
                 "failure_semantics": "control-plane calls return not_implemented/backend_unavailable/auth_missing errors instead of success-looking stubs",
                 "auditability": "runtime calls should preserve trace_id/audit events returned by the router",

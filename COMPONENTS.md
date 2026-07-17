@@ -163,7 +163,7 @@
 
 **Key interfaces:**
 - `contract` — prints `mcpfinder.cli.contract/v1` and canonical `python -m runtime.cli` entrypoint
-- `validate --config` — validates `mcpfinder.cli.config/v1` and rejects other products bleed
+- `validate --config` — validates `mcpfinder.cli.config/v1` and rejects Aether/OpenSnow bleed
 - `status` — calls real runtime `GET /health` and `GET /ready`
 - `invoke --dry-run` — prints exact `POST /call` request without backend/secrets; live invoke requires API key
 - `manifest list/get/register` — maps to `GET /manifests`, `GET /manifests/{name}`, `POST /manifests`, and `POST /manifests/typed`

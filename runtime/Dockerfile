@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY router*.py ./
 COPY policy_hooks.py .
 COPY credentials.py .
+COPY licensing.py .
 COPY channels*.yaml ./
 COPY types.yaml .
 COPY manifests/ manifests/

@@ -6,6 +6,7 @@ import MicrosoftEntraId from "next-auth/providers/microsoft-entra-id";
 import { Pool } from "pg";
 import bcrypt from "bcryptjs";
 import * as jose from "jose";
+import { hasFeature } from "@/lib/entitlement";
 import {
   getSigningKey,
   getVerificationKey,
@@ -221,6 +222,14 @@ export async function upsertSsoUser(params: {
   const { email, name, avatarUrl, tenantId, authProvider, oidcClaims } = params;
 
   try {
+    // Open-core gate: SSO / IdP login is an Enterprise feature. Without a
+    // license, all SSO logins (Google/Azure/OIDC) are denied — the free tier is
+    // single-user local login only. (Per-seat metering is a follow-up.)
+    if (!(await hasFeature("sso"))) {
+      console.error("[Auth] SSO login denied — Enterprise license required (sso):", email);
+      return null;
+    }
+
     // Upsert user — new users get is_active=true; existing users keep their current is_active
     const upsertResult = await pool.query(
       `INSERT INTO users (email, name, avatar_url, tenant_id, auth_provider, is_active)

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { pool } from "@/lib/db";
+import { hasFeature } from "@/lib/entitlement";
 
 interface TenantSsoRow {
   id: string;
@@ -23,6 +24,14 @@ function discoveryUrl(issuer: string): string {
 }
 
 export async function POST(request: NextRequest) {
+  // Open-core gate: SSO is an Enterprise feature. Fail fast before touching the IdP.
+  if (!(await hasFeature("sso"))) {
+    return NextResponse.json(
+      { error: "Single sign-on requires a Sealfleet Enterprise license." },
+      { status: 402 },
+    );
+  }
+
   const body = (await request.json().catch(() => null)) as {
     email?: string;
     state?: string;
