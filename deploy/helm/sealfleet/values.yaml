@@ -14,7 +14,7 @@ image:
   registry: ghcr.io/ebd-sweden
   # -- Image tag applied to all services unless overridden per service. Pin to a
   #    released version; `latest` is only published from the default branch.
-  tag: "0.2.0"
+  tag: "0.2.1"
   # -- Optional immutable digest (e.g. "sha256:...") applied to all services;
   #    overrides tag. Per-service override via <svc>.digest.
   digest: ""
@@ -30,6 +30,12 @@ licensing:
   # -- Bundled Sealfleet license public key (base64). Baked into released
   #    images; override only for self-issued/testing keys.
   publicKey: ""
+  # -- Public key RING (JSON array of base64 keys) for rotation — keep the old
+  #    key alongside the new so existing licenses still verify. See LICENSING.md.
+  publicKeys: ""
+  # -- Revoked license ids (comma-separated or JSON array) — blocklist a single
+  #    leaked/refunded license without rotating the signing key.
+  revokedIds: ""
   # -- Signed Sealfleet Enterprise license key (from sales). Empty = free tier.
   licenseKey: ""
   # -- AWS Marketplace product code — set when subscribed via AWS Marketplace;

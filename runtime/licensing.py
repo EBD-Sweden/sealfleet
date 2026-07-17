@@ -18,6 +18,7 @@ adapter is only invoked when explicitly enabled.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -63,6 +64,8 @@ class Entitlement:
     expires_at: int = 0          # unix seconds; 0 = perpetual
     source: str = "default"      # license_key | aws_marketplace | default
     reason: str = ""             # why free / why a key was rejected
+    license_id: str = ""         # license jti (for revocation), if present
+    signing_kid: str = ""        # id of the key that signed this license
 
     def has(self, feature: str) -> bool:
         return feature in self.features
@@ -97,10 +100,80 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def _load_public_key(pubkey_b64: str | None):
+def kid_for_pubkey(pubkey_b64: str) -> str:
+    """Deterministic key id = first 12 hex of sha256(raw public key).
+
+    Both the issuer and the verifier derive the same id from the public key, so
+    tokens can name their signing key (`kid`) without managing id strings.
+    """
+    return hashlib.sha256(base64.b64decode(pubkey_b64)).hexdigest()[:12]
+
+
+def _public_keyring(explicit_b64: str | None = None) -> dict:
+    """Return {kid: Ed25519PublicKey} the verifier will accept.
+
+    A ring lets you rotate: keep the old public key alongside the new one so
+    licenses signed by either still verify until the old ones expire. Sources
+    (all optional, additive):
+      * explicit_b64            — a single key (test/override); ring = just it.
+      * SEALFLEET_LICENSE_PUBKEYS — JSON list/object of base64 public keys.
+      * SEALFLEET_LICENSE_PUBKEY / bundled default — the single current key.
+    """
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    raw = base64.b64decode((pubkey_b64 or _DEFAULT_LICENSE_PUBKEY_B64))
-    return Ed25519PublicKey.from_public_bytes(raw)
+
+    b64_keys: list[str] = []
+    if explicit_b64:
+        b64_keys.append(explicit_b64)
+    else:
+        raw_ring = os.environ.get("SEALFLEET_LICENSE_PUBKEYS")
+        if raw_ring:
+            try:
+                parsed = json.loads(raw_ring)
+                if isinstance(parsed, dict):
+                    b64_keys.extend(str(v) for v in parsed.values())
+                elif isinstance(parsed, list):
+                    b64_keys.extend(str(v) for v in parsed)
+            except Exception:
+                log.warning("SEALFLEET_LICENSE_PUBKEYS is set but not valid JSON")
+        single = _DEFAULT_LICENSE_PUBKEY_B64 or os.environ.get("SEALFLEET_LICENSE_PUBKEY", "")
+        if single:
+            b64_keys.append(single)
+
+    ring: dict = {}
+    for b64 in b64_keys:
+        try:
+            raw = base64.b64decode(b64)
+            ring[hashlib.sha256(raw).hexdigest()[:12]] = Ed25519PublicKey.from_public_bytes(raw)
+        except Exception:
+            continue
+    return ring
+
+
+def _load_revoked_ids() -> set:
+    """License ids to reject even with a valid signature (compromise / refunds).
+
+    Sources: SEALFLEET_LICENSE_REVOKED (comma list or JSON array) and an optional
+    SEALFLEET_LICENSE_REVOCATION_FILE (JSON array or {"revoked": [...]}).
+    """
+    ids: set = set()
+    raw = os.environ.get("SEALFLEET_LICENSE_REVOKED", "")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            ids |= {str(x) for x in (parsed if isinstance(parsed, list) else [])}
+            if not isinstance(parsed, list):
+                raise ValueError
+        except Exception:
+            ids |= {x.strip() for x in raw.split(",") if x.strip()}
+    path = os.environ.get("SEALFLEET_LICENSE_REVOCATION_FILE")
+    if path:
+        try:
+            data = json.loads(open(path).read())
+            src = data if isinstance(data, list) else data.get("revoked", [])
+            ids |= {str(x) for x in src}
+        except Exception:
+            log.warning("could not read SEALFLEET_LICENSE_REVOCATION_FILE=%s", path)
+    return ids
 
 
 def verify_license_key(token: str, *, pubkey_b64: str | None = None,
@@ -114,16 +187,35 @@ def verify_license_key(token: str, *, pubkey_b64: str | None = None,
     now = int(now if now is not None else time.time())
     if not token:
         return _free("no license key")
-    if not (pubkey_b64 or _DEFAULT_LICENSE_PUBKEY_B64):
+    ring = _public_keyring(pubkey_b64)
+    if not ring:
         return _free("no license public key configured")
     try:
         payload_b64, sig_b64 = token.strip().split(".", 1)
         payload_bytes = _b64url_decode(payload_b64)
         signature = _b64url_decode(sig_b64)
-        _load_public_key(pubkey_b64).verify(signature, payload_bytes)
-    except ValueError:
-        return _free("malformed license key")
     except Exception:
+        return _free("malformed license key")
+
+    # Read the (unverified) kid to try the right key first; the signature check
+    # below is what actually gates. A token with no/unknown kid tries every key.
+    try:
+        peek = json.loads(payload_bytes)
+    except Exception:
+        peek = {}
+    kid = str(peek.get("kid", "")) if isinstance(peek, dict) else ""
+
+    # Try the named key first, then the rest of the ring (rotation-safe).
+    matched_kid = ""
+    verified = False
+    for kid_id in ([kid] if kid in ring else []) + [i for i in ring if i != kid]:
+        try:
+            ring[kid_id].verify(signature, payload_bytes)
+            verified, matched_kid = True, kid_id
+            break
+        except Exception:
+            continue
+    if not verified:
         return _free("license signature invalid")
 
     try:
@@ -134,6 +226,10 @@ def verify_license_key(token: str, *, pubkey_b64: str | None = None,
     exp = int(payload.get("exp", 0) or 0)
     if exp and now > exp:
         return _free(f"license expired at {exp}")
+
+    lic_id = str(payload.get("id", ""))
+    if lic_id and lic_id in _load_revoked_ids():
+        return _free(f"license revoked ({lic_id})")
 
     tier = str(payload.get("tier", TIER_ENTERPRISE))
     if tier == TIER_ENTERPRISE:
@@ -149,6 +245,7 @@ def verify_license_key(token: str, *, pubkey_b64: str | None = None,
         tier=tier, features=features, seats=seats,
         customer=str(payload.get("customer", "")),
         expires_at=exp, source="license_key",
+        license_id=lic_id, signing_kid=matched_kid,
     )
 
 

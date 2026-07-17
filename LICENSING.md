@@ -88,6 +88,34 @@ Marketplace Metering entitlement API and unlocks the enterprise tier. See
 [docs/DEPLOY.md](docs/DEPLOY.md) for deployment and
 `SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE` for the wiring.
 
+## Key rotation & revocation (seller)
+
+The verifier accepts a **ring** of public keys, so you can rotate the signing
+key without invalidating licenses already in the field.
+
+**Routine rotation:**
+1. `keygen` a new keypair (it prints the new key's `kid`).
+2. Deploy both keys in the ring so old *and* new licenses verify:
+   ```
+   SEALFLEET_LICENSE_PUBKEYS=["<old-pubkey-b64>","<new-pubkey-b64>"]
+   ```
+3. Sign all new licenses with the new private key.
+4. Once every license signed by the old key has expired, drop the old key from
+   the ring.
+
+**Revoking a single license** (e.g. refund, or a leaked key) — no rotation
+needed. Every issued key has an `id` (printed by `issue`); blocklist it:
+```
+SEALFLEET_LICENSE_REVOKED=lic-abc123,lic-def456      # comma list or JSON array
+# or a file: SEALFLEET_LICENSE_REVOCATION_FILE=/etc/sealfleet/revoked.json
+```
+A revoked license immediately degrades to the free tier.
+
+**If the private key is compromised:** add a new key to the ring, re-issue every
+legitimate customer a key signed with the new key, then remove the compromised
+key from the ring in the next release — the attacker's minted keys die, your
+customers' (already re-issued) keep working.
+
 ## Terms
 
 - The Sealfleet platform is licensed under **Apache-2.0** — use, modify, and

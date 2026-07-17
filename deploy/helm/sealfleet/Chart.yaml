@@ -9,10 +9,10 @@ description: |
 type: application
 
 # Chart version — bump on chart changes.
-version: 0.2.0
+version: 0.2.1
 
 # Default application version (image tag). Override via image.tag in values.yaml.
-appVersion: "0.2.0"
+appVersion: "0.2.1"
 
 keywords:
   - mcp

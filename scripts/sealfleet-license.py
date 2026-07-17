@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -35,27 +37,39 @@ def _b64url(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
 
+def _kid(pub_raw: bytes) -> str:
+    return hashlib.sha256(pub_raw).hexdigest()[:12]
+
+
 def cmd_keygen(args: argparse.Namespace) -> int:
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     priv = Ed25519PrivateKey.generate()
     priv_raw = priv.private_bytes_raw()
-    pub_b64 = base64.b64encode(priv.public_key().public_bytes_raw()).decode()
+    pub_raw = priv.public_key().public_bytes_raw()
+    pub_b64 = base64.b64encode(pub_raw).decode()
+    kid = _kid(pub_raw)
     (out / "private.key").write_text(base64.b64encode(priv_raw).decode() + "\n")
     (out / "private.key").chmod(0o600)
     (out / "public.b64").write_text(pub_b64 + "\n")
     print(f"private key -> {out/'private.key'}  (KEEP SECRET — never commit)")
-    print(f"public key  -> {out/'public.b64'}")
+    print(f"public key  -> {out/'public.b64'}   (kid: {kid})")
     print("\nBundle the public key into the app:")
     print(f"  SEALFLEET_LICENSE_PUBKEY={pub_b64}")
+    print("\nDuring rotation, keep old + new keys so existing licenses still verify:")
+    print(f'  SEALFLEET_LICENSE_PUBKEYS=[\"<old-pubkey-b64>\",\"{pub_b64}\"]')
     return 0
 
 
 def cmd_issue(args: argparse.Namespace) -> int:
     priv_raw = base64.b64decode(Path(args.private).read_text().strip())
     priv = Ed25519PrivateKey.from_private_bytes(priv_raw)
+    kid = _kid(priv.public_key().public_bytes_raw())
+    lic_id = args.id or secrets.token_hex(8)
     now = int(time.time())
     payload = {
+        "id": lic_id,
+        "kid": kid,
         "customer": args.customer,
         "tier": "enterprise",
         "seats": args.seats,
@@ -66,6 +80,9 @@ def cmd_issue(args: argparse.Namespace) -> int:
         payload["features"] = args.features
     body = json.dumps(payload, separators=(",", ":")).encode()
     token = f"{_b64url(body)}.{_b64url(priv.sign(body))}"
+    # id + kid go to stderr so a piped stdout stays just the key.
+    print(f"license id: {lic_id}  (record this — revoke via SEALFLEET_LICENSE_REVOKED)", file=sys.stderr)
+    print(f"signed by kid: {kid}", file=sys.stderr)
     print(token)
     return 0
 
@@ -84,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     i.add_argument("--seats", type=int, default=0, help="0 = unlimited")
     i.add_argument("--days", type=int, default=365, help="0 = perpetual")
     i.add_argument("--features", nargs="*", help="limit to specific features (default: all enterprise)")
+    i.add_argument("--id", default="", help="license id (default: random; used for revocation)")
     i.set_defaults(func=cmd_issue)
 
     args = p.parse_args(argv)

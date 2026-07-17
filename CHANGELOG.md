@@ -6,6 +6,18 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] — License key rotation & revocation
+
+### Added
+- License signing-key **rotation**: the verifier accepts a public-key *ring*
+  (`SEALFLEET_LICENSE_PUBKEYS`), so a new signing key can be introduced while
+  licenses signed by the old key keep verifying until they expire. Tokens carry
+  a `kid` naming their signing key.
+- License **revocation**: every issued key has an `id`; blocklist individual
+  licenses via `SEALFLEET_LICENSE_REVOKED` (or a revocation file) without
+  rotating the signing key. `scripts/sealfleet-license.py` now emits the `kid`
+  and a per-license `id`. Chart: `licensing.{publicKeys,revokedIds}`.
+
 ## [0.2.0] — Open-core licensing
 
 ### Added
@@ -54,6 +66,7 @@ First open-source release of the Sealfleet MCP Agent Platform.
 - GCP Terraform (`deploy/terraform/gcp`): GKE + Cloud SQL equivalent.
 - Docker Compose one-command local quickstart.
 
-[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.2.1
 [0.2.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.2.0
 [0.1.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.1.0

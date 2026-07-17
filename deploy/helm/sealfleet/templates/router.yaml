@@ -63,9 +63,17 @@ spec:
             - name: SEALFLEET_LICENSE_PUBKEY
               value: {{ .Values.licensing.publicKey | quote }}
             {{- end }}
+            {{- if .Values.licensing.publicKeys }}
+            - name: SEALFLEET_LICENSE_PUBKEYS
+              value: {{ .Values.licensing.publicKeys | quote }}
+            {{- end }}
             {{- if .Values.licensing.licenseKey }}
             - name: SEALFLEET_LICENSE_KEY
               value: {{ .Values.licensing.licenseKey | quote }}
+            {{- end }}
+            {{- if .Values.licensing.revokedIds }}
+            - name: SEALFLEET_LICENSE_REVOKED
+              value: {{ .Values.licensing.revokedIds | quote }}
             {{- end }}
             {{- if .Values.licensing.awsMarketplaceProductCode }}
             - name: SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE

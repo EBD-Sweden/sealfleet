@@ -103,6 +103,44 @@ def test_malformed_token_is_free(keypair):
     assert licensing.verify_license_key("a.b.c", pubkey_b64=pub).tier == licensing.TIER_FREE
 
 
+def test_keyring_rotation_old_and_new_keys_both_verify(monkeypatch):
+    # Two issuer keypairs (old + new). During rotation both public keys are in
+    # the ring, so licenses signed by either still verify.
+    old = Ed25519PrivateKey.generate()
+    new = Ed25519PrivateKey.generate()
+    old_pub = base64.b64encode(old.public_key().public_bytes_raw()).decode()
+    new_pub = base64.b64encode(new.public_key().public_bytes_raw()).decode()
+
+    old_kid = licensing.kid_for_pubkey(old_pub)
+    new_kid = licensing.kid_for_pubkey(new_pub)
+    tok_old = _issue(old, {"tier": "enterprise", "kid": old_kid, "exp": int(time.time()) + 3600})
+    tok_new = _issue(new, {"tier": "enterprise", "kid": new_kid, "exp": int(time.time()) + 3600})
+
+    monkeypatch.setattr(licensing, "_DEFAULT_LICENSE_PUBKEY_B64", "")
+    monkeypatch.setenv("SEALFLEET_LICENSE_PUBKEYS", json.dumps([old_pub, new_pub]))
+
+    assert licensing.verify_license_key(tok_old).is_enterprise  # old still works
+    assert licensing.verify_license_key(tok_new).is_enterprise  # new works
+    assert licensing.verify_license_key(tok_new).signing_kid == new_kid
+
+    # After the old key is retired (removed from the ring), old licenses stop.
+    monkeypatch.setenv("SEALFLEET_LICENSE_PUBKEYS", json.dumps([new_pub]))
+    assert licensing.verify_license_key(tok_old).tier == licensing.TIER_FREE
+    assert licensing.verify_license_key(tok_new).is_enterprise
+
+
+def test_revoked_license_id_degrades_to_free(keypair, monkeypatch):
+    priv, pub = keypair
+    token = _issue(priv, {"id": "lic-abc123", "tier": "enterprise",
+                          "exp": int(time.time()) + 3600})
+    assert licensing.verify_license_key(token, pubkey_b64=pub).is_enterprise
+    # revoke by id
+    monkeypatch.setenv("SEALFLEET_LICENSE_REVOKED", "lic-abc123, other-id")
+    ent = licensing.verify_license_key(token, pubkey_b64=pub)
+    assert ent.tier == licensing.TIER_FREE
+    assert "revoked" in ent.reason
+
+
 def test_resolver_env_and_cache(keypair, monkeypatch):
     priv, pub = keypair
     token = _issue(priv, {"customer": "Cached Co", "tier": "enterprise",
