@@ -43,8 +43,8 @@ RBAC/audit — via a license key or an **AWS Marketplace** subscription. Apply a
 key by setting `SEALFLEET_LICENSE_KEY` (or `licensing.licenseKey` in Helm), then
 check `GET /license`.
 
-**Get a license / talk to us:** <!-- TODO: replace with your sales channel -->
-sales@sealfleet.io · or open a [GitHub discussion](https://github.com/EBD-Sweden/sealfleet/discussions).
+**Get a license / talk to us:** 
+sales@sealfleet.ebdsweden.com · or open a [GitHub discussion](https://github.com/EBD-Sweden/sealfleet/discussions).
 
 
 ## Deploying
