@@ -53,7 +53,9 @@ sales@sealfleet.example.com · or open a [GitHub discussion](https://github.com/
   Postgres + secrets + ingress in **your** AWS or GCP account.
 - **Existing cluster:** `helm install` the chart with your managed Postgres.
 - **Hosted / managed service (scale-to-zero):** run it yourself on Cloud Run
-  at ~$0 idle — see [docs/HOSTED.md](docs/HOSTED.md).
+  at ~$0 idle — see [docs/HOSTED.md](docs/HOSTED.md). Self-serve signup + Stripe
+  billing: [docs/BILLING.md](docs/BILLING.md). Operator setup (GCP/Neon/Stripe/
+  AWS Marketplace): [docs/GO-LIVE.md](docs/GO-LIVE.md).
 
 Full guide with prerequisites, secrets, TLS, upgrade/teardown, and a production
 checklist: **[docs/DEPLOY.md](docs/DEPLOY.md)**.

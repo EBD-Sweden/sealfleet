@@ -26,7 +26,7 @@ variable "image_registry" {
 variable "image_tag" {
   description = "Image tag for all services. Pin to a release."
   type        = string
-  default     = "0.3.0"
+  default     = "0.4.0"
 }
 
 # --- Database (serverless Postgres, external — e.g. Neon / Supabase) --------
@@ -86,6 +86,28 @@ variable "nextauth_secret" {
   type        = string
   default     = ""
   sensitive   = true
+}
+
+# --- Billing (Stripe — direct-billing for the hosted service) ---------------
+
+variable "stripe_secret_key" {
+  description = "Stripe secret key (sk_live_… / sk_test_…). Stored in Secret Manager. Empty = billing disabled (portal shows 'not configured')."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "stripe_webhook_secret" {
+  description = "Stripe webhook signing secret (whsec_…) for /api/billing/webhook. Stored in Secret Manager."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "stripe_price_enterprise" {
+  description = "Stripe recurring Price ID (price_…) for the Enterprise plan the Subscribe button checks out."
+  type        = string
+  default     = ""
 }
 
 # --- Licensing (this hosted service is the Enterprise tier) ------------------

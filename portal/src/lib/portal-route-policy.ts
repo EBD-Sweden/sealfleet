@@ -1,12 +1,16 @@
 const PUBLIC_EXACT_PATHS = new Set([
   "/",
   "/login",
+  "/signup",
   "/favicon.ico",
   "/api/health",
   "/api/ready",
   "/api/.well-known/jwks.json",
   "/api/.well-known/oauth-protected-resource",
   "/api/sso/start",
+  "/api/signup",
+  // Stripe calls this server-to-server; it authenticates via signature, not session.
+  "/api/billing/webhook",
 ]);
 
 // Deployments may whitelist additional exact public paths (e.g. an OAuth

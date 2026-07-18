@@ -6,6 +6,26 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — Self-serve signup + Stripe billing (hosted)
+
+### Added
+- **Self-serve signup** (`/signup`, `POST /api/signup`): creates a tenant +
+  admin user + first API key in one transaction — no admin needed. Turn off
+  with `DISABLE_SELF_SIGNUP=true`.
+- **Stripe billing** for the hosted service (`docs/BILLING.md`): Checkout,
+  webhook (signature-verified, no SDK — `fetch` + Node `crypto`), Billing
+  Portal, and a `/billing` page. A tenant's access is enforced by tying its API
+  keys' `is_active` to Stripe subscription status.
+- **Usage metering feed**: migration `014_billing.sql` finally creates the
+  `api_key_usage_log` table (the router already wrote to it) plus
+  `api_keys.request_count/last_used_at` and a `subscriptions` table.
+- Bundled the production Sealfleet license **public** key so released images
+  verify Enterprise license tokens out of the box.
+
+### Fixed
+- Router usage logging + per-key counters silently no-op'd because no migration
+  created their table/columns; `014_billing.sql` adds them.
+
 ## [0.3.0] — Hosted (scale-to-zero) deployment
 
 ### Added
@@ -78,7 +98,8 @@ First open-source release of the Sealfleet MCP Agent Platform.
 - GCP Terraform (`deploy/terraform/gcp`): GKE + Cloud SQL equivalent.
 - Docker Compose one-command local quickstart.
 
-[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.4.0
 [0.3.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.3.0
 [0.2.1]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.2.1
 [0.2.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.2.0

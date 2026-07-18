@@ -1,0 +1,154 @@
+// Minimal Stripe client — talks to the Stripe REST API directly with fetch and
+// verifies webhooks with Node crypto, so we add NO npm dependency (keeps the
+// portal image small and the supply chain tight). Covers exactly what the
+// hosted billing flow needs: Checkout, Billing Portal, and webhook verification.
+
+import crypto from "crypto";
+
+const STRIPE_API = "https://api.stripe.com/v1";
+
+// Minimal shapes of the Stripe objects/events this integration touches. Stripe
+// payloads carry far more; we type only what the webhook/handlers read.
+export interface StripeObject {
+  id?: string;
+  customer?: string | null;
+  subscription?: string | null;
+  status?: string;
+  client_reference_id?: string | null;
+  metadata?: Record<string, string> | null;
+  current_period_end?: number;
+  items?: { data?: Array<{ price?: { id?: string }; quantity?: number }> };
+}
+
+export interface StripeEvent {
+  type: string;
+  data?: { object?: StripeObject };
+}
+
+export function stripeConfigured(): boolean {
+  return Boolean(process.env.STRIPE_SECRET_KEY);
+}
+
+export function stripePriceId(): string {
+  return process.env.STRIPE_PRICE_ENTERPRISE ?? "";
+}
+
+function secretKey(): string {
+  const k = process.env.STRIPE_SECRET_KEY;
+  if (!k) throw new Error("STRIPE_SECRET_KEY is not set");
+  return k;
+}
+
+// Stripe expects application/x-www-form-urlencoded with bracket notation for
+// nested params, e.g. line_items[0][price]=price_123.
+function encodeForm(obj: Record<string, unknown>, prefix = ""): string[] {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === undefined || value === null) continue;
+    const name = prefix ? `${prefix}[${key}]` : key;
+    if (typeof value === "object") {
+      parts.push(...encodeForm(value as Record<string, unknown>, name));
+    } else {
+      parts.push(`${encodeURIComponent(name)}=${encodeURIComponent(String(value))}`);
+    }
+  }
+  return parts;
+}
+
+async function stripePost<T = Record<string, unknown>>(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<T> {
+  const res = await fetch(`${STRIPE_API}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${secretKey()}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: encodeForm(body).join("&"),
+  });
+  const json = (await res.json()) as { error?: { message?: string } };
+  if (!res.ok) {
+    throw new Error(`Stripe ${path} failed: ${json?.error?.message ?? res.status}`);
+  }
+  return json as T;
+}
+
+export interface CheckoutParams {
+  tenantId: string;
+  email?: string;
+  customerId?: string;
+  successUrl: string;
+  cancelUrl: string;
+  quantity?: number;
+}
+
+// Create a subscription Checkout Session and return its hosted URL.
+export async function createCheckoutSession(p: CheckoutParams): Promise<{ id: string; url: string }> {
+  const price = stripePriceId();
+  if (!price) throw new Error("STRIPE_PRICE_ENTERPRISE is not set");
+  const body: Record<string, unknown> = {
+    mode: "subscription",
+    "line_items": [{ price, quantity: p.quantity ?? 1 }],
+    success_url: p.successUrl,
+    cancel_url: p.cancelUrl,
+    client_reference_id: p.tenantId,
+    // Stamp tenant_id on BOTH the session and the resulting subscription so the
+    // webhook can map any subscription event back to a tenant.
+    metadata: { tenant_id: p.tenantId },
+    subscription_data: { metadata: { tenant_id: p.tenantId } },
+    allow_promotion_codes: true,
+  };
+  if (p.customerId) body.customer = p.customerId;
+  else if (p.email) body.customer_email = p.email;
+  const session = await stripePost<{ id: string; url: string }>("/checkout/sessions", body);
+  return { id: session.id, url: session.url };
+}
+
+// Create a Billing Portal session so a customer can manage/cancel their plan.
+export async function createBillingPortalSession(customerId: string, returnUrl: string): Promise<{ url: string }> {
+  const session = await stripePost<{ url: string }>("/billing_portal/sessions", {
+    customer: customerId,
+    return_url: returnUrl,
+  });
+  return { url: session.url };
+}
+
+// Verify a Stripe webhook signature (the `Stripe-Signature` header) against the
+// raw request body. Mirrors Stripe's scheme: v1 = HMAC-SHA256 of `${t}.${body}`.
+// tolerance defaults to 5 minutes to reject replayed events.
+export function verifyWebhook(
+  rawBody: string,
+  sigHeader: string | null,
+  secret: string,
+  nowSeconds: number,
+  toleranceSeconds = 300,
+): StripeEvent {
+  if (!sigHeader) throw new Error("Missing Stripe-Signature header");
+  const parts = Object.fromEntries(
+    sigHeader.split(",").map((kv) => {
+      const [k, v] = kv.split("=");
+      return [k, v];
+    }),
+  );
+  const t = parts["t"];
+  const v1 = parts["v1"];
+  if (!t || !v1) throw new Error("Malformed Stripe-Signature header");
+
+  const timestamp = Number(t);
+  if (!Number.isFinite(timestamp) || Math.abs(nowSeconds - timestamp) > toleranceSeconds) {
+    throw new Error("Stripe-Signature timestamp outside tolerance");
+  }
+
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(`${t}.${rawBody}`, "utf8")
+    .digest("hex");
+
+  const a = Buffer.from(expected);
+  const b = Buffer.from(v1);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    throw new Error("Stripe-Signature verification failed");
+  }
+  return JSON.parse(rawBody);
+}

@@ -69,6 +69,41 @@ resource "google_secret_manager_secret_iam_member" "accessor" {
   member    = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
 }
 
+# Optional Stripe secrets — created only when provided (empty => billing off).
+# for_each must be non-sensitive, so drive it off a presence check (the *keys*
+# are static strings) and pull the sensitive value by key for secret_data.
+locals {
+  stripe_values = {
+    STRIPE_SECRET_KEY     = var.stripe_secret_key
+    STRIPE_WEBHOOK_SECRET = var.stripe_webhook_secret
+  }
+  stripe_keys = toset(concat(
+    nonsensitive(var.stripe_secret_key != "") ? ["STRIPE_SECRET_KEY"] : [],
+    nonsensitive(var.stripe_webhook_secret != "") ? ["STRIPE_WEBHOOK_SECRET"] : [],
+  ))
+}
+
+resource "google_secret_manager_secret" "stripe" {
+  for_each  = local.stripe_keys
+  secret_id = "${var.name}-${lower(replace(each.value, "_", "-"))}"
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "stripe" {
+  for_each    = local.stripe_keys
+  secret      = google_secret_manager_secret.stripe[each.value].id
+  secret_data = local.stripe_values[each.value]
+}
+
+resource "google_secret_manager_secret_iam_member" "stripe_accessor" {
+  for_each  = local.stripe_keys
+  secret_id = google_secret_manager_secret.stripe[each.value].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
+}
+
 # ---------------------------------------------------------------------------
 # Registry (discovery) — internal, scale-to-zero.
 # ---------------------------------------------------------------------------
@@ -214,9 +249,34 @@ resource "google_cloud_run_v2_service" "portal" {
         name  = "AUTH_URL"
         value = var.portal_public_url != "" ? var.portal_public_url : ""
       }
+      env {
+        name  = "PORTAL_PUBLIC_URL"
+        value = var.portal_public_url != "" ? var.portal_public_url : ""
+      }
+      # Stripe billing (portal-side). Secrets injected only when provided;
+      # the price ID is not secret.
+      dynamic "env" {
+        for_each = local.stripe_keys
+        content {
+          name = env.value
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.stripe[env.value].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+      dynamic "env" {
+        for_each = var.stripe_price_enterprise != "" ? { STRIPE_PRICE_ENTERPRISE = var.stripe_price_enterprise } : {}
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
     }
   }
-  depends_on = [google_secret_manager_secret_version.v]
+  depends_on = [google_secret_manager_secret_version.v, google_secret_manager_secret_version.stripe]
 }
 
 # ---------------------------------------------------------------------------

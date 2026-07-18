@@ -52,7 +52,11 @@ FREE_TIER_SEATS = 1
 # Bundled Sealfleet license public key (Ed25519, base64). The matching private
 # key is held by the Sealfleet license issuer and NEVER ships. Overridable via
 # SEALFLEET_LICENSE_PUBKEY for self-hosted issuing / testing.
-_DEFAULT_LICENSE_PUBKEY_B64 = os.environ.get("SEALFLEET_LICENSE_PUBKEY", "")
+#   kid: 8be92d1378a6  (sha256(pubkey)[:12] — the key id embedded in tokens)
+_BUNDLED_LICENSE_PUBKEY_B64 = "fu8kYKlD2gWJIy1xVB5LQBW+TtHGtxqdr9bSLj5BPTE="
+_DEFAULT_LICENSE_PUBKEY_B64 = (
+    os.environ.get("SEALFLEET_LICENSE_PUBKEY", "") or _BUNDLED_LICENSE_PUBKEY_B64
+)
 
 
 @dataclass(frozen=True)
