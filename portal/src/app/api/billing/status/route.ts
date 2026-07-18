@@ -4,7 +4,7 @@
 import { NextResponse } from "next/server";
 import { requirePortalSession } from "@/lib/portal-auth";
 import { getSubscription, usageCount, isEntitled } from "@/lib/billing";
-import { stripeConfigured, stripePriceId } from "@/lib/stripe";
+import { stripeConfigured, availablePlans } from "@/lib/stripe";
 
 export const runtime = "nodejs";
 
@@ -19,14 +19,16 @@ export async function GET() {
   monthStart.setUTCDate(1);
   monthStart.setUTCHours(0, 0, 0, 0);
   const usage = await usageCount(tenantId, monthStart);
+  const plans = availablePlans().map((p) => ({ key: p.key, label: p.label, blurb: p.blurb, metered: p.metered }));
 
   return NextResponse.json({
-    billing_enabled: stripeConfigured() && Boolean(stripePriceId()),
+    billing_enabled: stripeConfigured() && plans.length > 0,
     status: sub?.status ?? "inactive",
     entitled: isEntitled(sub?.status),
     plan: sub?.plan ?? null,
     current_period_end: sub?.current_period_end ?? null,
     has_customer: Boolean(sub?.stripe_customer_id),
     usage_this_month: usage,
+    plans,
   });
 }

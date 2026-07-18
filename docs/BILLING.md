@@ -49,14 +49,32 @@ No `stripe` npm package is used — the client talks to the Stripe REST API with
 `fetch` and verifies webhooks with Node `crypto` (HMAC-SHA256, ±5-min tolerance),
 so the portal image gains no dependency.
 
-## Stripe setup (EBD Sweden AB account)
+## Plans
 
-1. **Product + price.** Stripe Dashboard → *Product catalog* → create
-   **"Sealfleet Enterprise"** with a **recurring** price (e.g. monthly). Copy the
-   **Price ID** (`price_…`). For usage-based billing, add a **metered** price and
-   report usage from `api_key_usage_log` (see *Metered billing*, below).
-2. **API key.** *Developers → API keys* → copy the **secret key** (`sk_live_…`).
-3. **Webhook.** *Developers → Webhooks* → add endpoint
+The `/billing` page offers whichever of these plans have a price ID configured,
+so a new customer can "get started easily":
+
+| Plan | env | Kind | Lookup key |
+|---|---|---|---|
+| Hosted Monthly | `STRIPE_PRICE_HOSTED_MONTHLY` | flat recurring | `sealfleet_hosted_monthly` |
+| Hosted Annual | `STRIPE_PRICE_HOSTED_ANNUAL` | flat recurring | `sealfleet_hosted_annual` |
+| Hosted Usage-only | `STRIPE_PRICE_HOSTED_USAGE` | metered (meter `sealfleet_api_calls`) | `sealfleet_hosted_usage` |
+
+`POST /api/billing/checkout {"plan":"monthly|annual|usage"}` starts Checkout for
+the chosen plan. The self-hosted **license** products (annual/monthly) are sold
+separately (license key / AWS Marketplace), not through this self-serve flow.
+
+## Stripe setup (Evid Invest / EBD Sweden account)
+
+The product catalog is created by `scripts/stripe-setup` (idempotent, keyed by
+price `lookup_key`), or in the Dashboard. It creates two products —
+**"Sealfleet Enterprise — Hosted"** (monthly/annual/usage/overage prices) and
+**"Sealfleet Enterprise — Self-Hosted License"** (annual/monthly) — plus the
+**`sealfleet_api_calls`** Billing Meter.
+
+Then:
+1. **API key.** *Developers → API keys* → **secret key** (`sk_live_…`).
+2. **Webhook.** *Developers → Webhooks* → add endpoint
    `https://app.sealfleet.example.com/api/billing/webhook`, subscribe to:
    `checkout.session.completed`, `customer.subscription.created`,
    `customer.subscription.updated`, `customer.subscription.deleted`. Copy the
@@ -68,7 +86,10 @@ so the portal image gains no dependency.
 |---|---|
 | `STRIPE_SECRET_KEY` | `sk_live_…` — server API calls. Empty ⇒ billing disabled (portal shows "not configured"). |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` — webhook signature verification. |
-| `STRIPE_PRICE_ENTERPRISE` | `price_…` — the plan the Subscribe button checks out. |
+| `STRIPE_PRICE_HOSTED_MONTHLY` / `_ANNUAL` / `_USAGE` | `price_…` — the plans offered on `/billing`. Set any subset. |
+| `STRIPE_PRICE_ENTERPRISE` | Legacy single price — used as "monthly" if the per-plan IDs are unset. |
+| `STRIPE_METER_EVENT_NAME` | Billing Meter `event_name` the usage reporter emits (default `sealfleet_api_calls`). |
+| `BILLING_CRON_SECRET` | Shared secret the usage-report cron sends as `x-billing-cron-secret`. |
 | `PORTAL_PUBLIC_URL` | Public portal URL for Checkout success/cancel + return links. |
 | `DISABLE_SELF_SIGNUP` | `true` to turn off `/api/signup` (e.g. self-hosted single-tenant). |
 
@@ -99,10 +120,23 @@ stripe listen --forward-to localhost:3004/api/billing/webhook
 stripe trigger checkout.session.completed
 ```
 
-## Metered billing (next step)
+## Metered (usage) billing
 
-The schema + metering feed are in place: the router writes every API call to
-`api_key_usage_log`, and `usageCount(tenantId, since)` (`portal/src/lib/billing.ts`)
-aggregates it. To bill per-usage, add a scheduled job that sums each tenant's
-calls per period and reports them to Stripe as **usage records** against a
-metered price. Not wired yet — flat subscription is the default.
+Wired end-to-end. The router writes every API call to `api_key_usage_log`; the
+**usage reporter** (`POST /api/billing/report-usage`) aggregates each metered
+tenant's calls since a per-tenant watermark and pushes one Stripe **meter event**
+(`sealfleet_api_calls`) per window, then advances the watermark so each call is
+billed exactly once. A brand-new subscription's watermark is planted on first
+tick so pre-subscription usage isn't billed.
+
+The endpoint authenticates with the `x-billing-cron-secret` header (not a
+session), so schedule it however you like:
+
+- **Hosted Cloud Run:** the Terraform module creates a **Cloud Scheduler** job
+  (`usage_report_schedule`, default hourly) that POSTs it — enable the
+  `cloudscheduler.googleapis.com` API. Created only when metered billing is
+  configured (`stripe_price_hosted_usage` + `stripe_secret_key` set).
+- **Self-hosted / k8s:** a CronJob (or any cron) hitting the same URL with the
+  header.
+
+Tune the rate on the meter's price (`sealfleet_hosted_usage`, €49/1M by default).

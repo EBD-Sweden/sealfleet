@@ -3,7 +3,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requirePortalSession } from "@/lib/portal-auth";
-import { createCheckoutSession, stripeConfigured, stripePriceId } from "@/lib/stripe";
+import { createCheckoutSession, stripeConfigured, availablePlans, planByKey } from "@/lib/stripe";
 import { getSubscription } from "@/lib/billing";
 
 export const runtime = "nodejs";
@@ -23,9 +23,14 @@ export async function POST(req: NextRequest) {
   const tenantId = context!.user.tenant_id;
   if (!tenantId) return NextResponse.json({ error: "No tenant on session" }, { status: 400 });
 
-  if (!stripeConfigured() || !stripePriceId()) {
+  const plans = availablePlans();
+  if (!stripeConfigured() || plans.length === 0) {
     return NextResponse.json({ error: "Billing is not configured" }, { status: 503 });
   }
+
+  // Pick the requested plan (default: first available).
+  const body = await req.json().catch(() => ({}));
+  const plan = (body?.plan ? planByKey(body.plan) : undefined) ?? plans[0];
 
   const sub = await getSubscription(tenantId);
   const origin = baseUrl(req);
@@ -35,6 +40,8 @@ export async function POST(req: NextRequest) {
       tenantId,
       email: context!.user.email,
       customerId: sub?.stripe_customer_id ?? undefined,
+      priceId: plan.priceId,
+      metered: plan.metered,
       successUrl: `${origin}/billing?checkout=success`,
       cancelUrl: `${origin}/billing?checkout=cancelled`,
     });

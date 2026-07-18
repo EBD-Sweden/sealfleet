@@ -15,7 +15,10 @@ locals {
   encryption_key           = var.encryption_key != "" ? var.encryption_key : random_password.encryption_key.result
   nextauth_secret          = var.nextauth_secret != "" ? var.nextauth_secret : random_password.nextauth_secret.result
   router_rs256_private_key = var.router_rs256_private_key != "" ? var.router_rs256_private_key : tls_private_key.router.private_key_pem
+  billing_cron_secret      = var.billing_cron_secret != "" ? var.billing_cron_secret : random_password.billing_cron_secret.result
   image                    = { for s in ["runtime", "registry", "portal"] : s => "${var.image_registry}/sealfleet-${s}:${var.image_tag}" }
+  # Create the usage-reporter schedule only if billing is on and a schedule is set.
+  usage_reporter_enabled = var.stripe_secret_key != "" && var.stripe_price_hosted_usage != "" && var.usage_report_schedule != ""
 }
 
 resource "random_password" "encryption_key" {
@@ -24,6 +27,11 @@ resource "random_password" "encryption_key" {
 }
 
 resource "random_password" "nextauth_secret" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "billing_cron_secret" {
   length  = 32
   special = false
 }
@@ -42,6 +50,7 @@ locals {
     ENCRYPTION_KEY           = local.encryption_key
     ROUTER_RS256_PRIVATE_KEY = local.router_rs256_private_key
     NEXTAUTH_SECRET          = local.nextauth_secret
+    BILLING_CRON_SECRET      = local.billing_cron_secret
   }
 }
 
@@ -267,16 +276,54 @@ resource "google_cloud_run_v2_service" "portal" {
           }
         }
       }
+      # Plan price IDs + meter name (not secret) — each present only when set.
       dynamic "env" {
-        for_each = var.stripe_price_enterprise != "" ? { STRIPE_PRICE_ENTERPRISE = var.stripe_price_enterprise } : {}
+        for_each = { for k, v in {
+          STRIPE_PRICE_ENTERPRISE     = var.stripe_price_enterprise
+          STRIPE_PRICE_HOSTED_MONTHLY = var.stripe_price_hosted_monthly
+          STRIPE_PRICE_HOSTED_ANNUAL  = var.stripe_price_hosted_annual
+          STRIPE_PRICE_HOSTED_USAGE   = var.stripe_price_hosted_usage
+          STRIPE_METER_EVENT_NAME     = var.stripe_meter_event_name
+        } : k => v if v != "" }
         content {
           name  = env.key
           value = env.value
         }
       }
+      # Shared secret for the usage-report cron endpoint.
+      env {
+        name = "BILLING_CRON_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.s["BILLING_CRON_SECRET"].secret_id
+            version = "latest"
+          }
+        }
+      }
     }
   }
   depends_on = [google_secret_manager_secret_version.v, google_secret_manager_secret_version.stripe]
+}
+
+# ---------------------------------------------------------------------------
+# Usage reporter — Cloud Scheduler POSTs the portal's report-usage endpoint on a
+# schedule; the endpoint aggregates api_key_usage_log and pushes Stripe meter
+# events. Created only when metered billing is configured.
+# ---------------------------------------------------------------------------
+resource "google_cloud_scheduler_job" "usage_reporter" {
+  count     = local.usage_reporter_enabled ? 1 : 0
+  name      = "${var.name}-usage-reporter"
+  region    = var.region
+  schedule  = var.usage_report_schedule
+  time_zone = "Etc/UTC"
+
+  http_target {
+    http_method = "POST"
+    uri         = "${google_cloud_run_v2_service.portal.uri}/api/billing/report-usage"
+    headers = {
+      "x-billing-cron-secret" = local.billing_cron_secret
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------

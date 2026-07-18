@@ -5,6 +5,13 @@ import { CreditCard, Loader2 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
+interface Plan {
+  key: string;
+  label: string;
+  blurb: string;
+  metered: boolean;
+}
+
 interface Status {
   billing_enabled: boolean;
   status: string;
@@ -13,6 +20,7 @@ interface Status {
   current_period_end: string | null;
   has_customer: boolean;
   usage_this_month: number;
+  plans: Plan[];
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -37,11 +45,15 @@ export default function BillingPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  async function go(path: string) {
+  async function go(path: string, body?: unknown) {
     setActing(true);
     setError("");
     try {
-      const res = await fetch(path, { method: "POST" });
+      const res = await fetch(path, {
+        method: "POST",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.url) {
         setError(data.error || "Something went wrong");
@@ -99,9 +111,26 @@ export default function BillingPage() {
                 {acting ? "Opening…" : "Manage subscription"}
               </Button>
             ) : (
-              <Button onClick={() => go("/api/billing/checkout")} disabled={acting}>
-                {acting ? "Starting…" : "Subscribe"}
-              </Button>
+              <div className="space-y-3">
+                <p className="text-sm font-medium">Choose a plan to get started</p>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {status.plans.map((p) => (
+                    <div key={p.key} className="flex flex-col rounded-lg border p-4">
+                      <div className="font-medium">{p.label}</div>
+                      <p className="mt-1 flex-1 text-xs text-muted-foreground">{p.blurb}</p>
+                      <Button
+                        className="mt-3"
+                        size="sm"
+                        variant={p.key === "usage" ? "outline" : "default"}
+                        onClick={() => go("/api/billing/checkout", { plan: p.key })}
+                        disabled={acting}
+                      >
+                        {acting ? "Starting…" : p.metered ? "Start" : "Subscribe"}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>

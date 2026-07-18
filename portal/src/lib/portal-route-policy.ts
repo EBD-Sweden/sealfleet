@@ -11,6 +11,8 @@ const PUBLIC_EXACT_PATHS = new Set([
   "/api/signup",
   // Stripe calls this server-to-server; it authenticates via signature, not session.
   "/api/billing/webhook",
+  // The usage-report cron calls this with a shared-secret header, not a session.
+  "/api/billing/report-usage",
 ]);
 
 // Deployments may whitelist additional exact public paths (e.g. an OAuth

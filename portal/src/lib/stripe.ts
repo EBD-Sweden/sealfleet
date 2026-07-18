@@ -39,6 +39,60 @@ function secretKey(): string {
   return k;
 }
 
+export type PlanKey = "monthly" | "annual" | "usage";
+
+export interface Plan {
+  key: PlanKey;
+  label: string;
+  priceId: string;
+  metered: boolean;
+  blurb: string;
+}
+
+// The self-serve plans, resolved from env price IDs. A plan appears only if its
+// price ID is configured, so a deployment can offer any subset.
+export function availablePlans(): Plan[] {
+  const defs: Array<Omit<Plan, "priceId"> & { env: string }> = [
+    { key: "monthly", label: "Monthly", metered: false, env: "STRIPE_PRICE_HOSTED_MONTHLY",
+      blurb: "Flat monthly, includes a generous call allowance." },
+    { key: "annual", label: "Annual", metered: false, env: "STRIPE_PRICE_HOSTED_ANNUAL",
+      blurb: "Best value — save vs monthly, billed yearly." },
+    { key: "usage", label: "Usage-only", metered: true, env: "STRIPE_PRICE_HOSTED_USAGE",
+      blurb: "No base fee — pay only for API calls. Easiest way to start." },
+  ];
+  const plans: Plan[] = [];
+  for (const d of defs) {
+    const priceId = process.env[d.env];
+    if (priceId) plans.push({ key: d.key, label: d.label, priceId, metered: d.metered, blurb: d.blurb });
+  }
+  // Back-compat: if only the legacy single price is set, expose it as monthly.
+  if (plans.length === 0 && stripePriceId()) {
+    plans.push({ key: "monthly", label: "Subscribe", priceId: stripePriceId(), metered: false,
+      blurb: "Enterprise subscription." });
+  }
+  return plans;
+}
+
+export function planByKey(key: string): Plan | undefined {
+  return availablePlans().find((p) => p.key === key);
+}
+
+// Report usage to a Stripe Billing Meter. `value` is the number of API calls in
+// the window; `identifier` dedupes retries. Used by the report-usage job.
+export async function reportMeterEvent(
+  customerId: string,
+  value: number,
+  identifier: string,
+): Promise<void> {
+  const eventName = process.env.STRIPE_METER_EVENT_NAME || "sealfleet_api_calls";
+  await stripePost("/billing/meter_events", {
+    event_name: eventName,
+    identifier,
+    "payload[stripe_customer_id]": customerId,
+    "payload[value]": String(value),
+  });
+}
+
 // Stripe expects application/x-www-form-urlencoded with bracket notation for
 // nested params, e.g. line_items[0][price]=price_123.
 function encodeForm(obj: Record<string, unknown>, prefix = ""): string[] {
@@ -81,15 +135,19 @@ export interface CheckoutParams {
   successUrl: string;
   cancelUrl: string;
   quantity?: number;
+  priceId?: string;
+  // Metered prices cannot carry a quantity in Checkout.
+  metered?: boolean;
 }
 
 // Create a subscription Checkout Session and return its hosted URL.
 export async function createCheckoutSession(p: CheckoutParams): Promise<{ id: string; url: string }> {
-  const price = stripePriceId();
-  if (!price) throw new Error("STRIPE_PRICE_ENTERPRISE is not set");
+  const price = p.priceId || stripePriceId();
+  if (!price) throw new Error("No Stripe price configured (STRIPE_PRICE_ENTERPRISE or a plan price)");
+  const lineItem: Record<string, unknown> = p.metered ? { price } : { price, quantity: p.quantity ?? 1 };
   const body: Record<string, unknown> = {
     mode: "subscription",
-    "line_items": [{ price, quantity: p.quantity ?? 1 }],
+    "line_items": [lineItem],
     success_url: p.successUrl,
     cancel_url: p.cancelUrl,
     client_reference_id: p.tenantId,

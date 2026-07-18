@@ -6,6 +6,23 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] — Billing plans + metered usage
+
+### Added
+- **Multiple hosted plans** so customers can self-serve start any way: Monthly,
+  Annual, and **Usage-only** (metered). `/billing` shows the configured plans;
+  `POST /api/billing/checkout {"plan":...}` starts the right Checkout.
+- **Metered usage billing, wired end-to-end**: `POST /api/billing/report-usage`
+  (cron, secret-gated) aggregates each metered tenant's `api_key_usage_log`
+  since a per-tenant watermark and pushes a Stripe **meter event**
+  (`sealfleet_api_calls`), billing each call once. Hosted Terraform creates a
+  **Cloud Scheduler** job to drive it.
+- `scripts/stripe-setup.py`: idempotent creation of the full Stripe catalog
+  (Hosted monthly/annual/usage/overage + Self-Hosted License annual/monthly +
+  the usage meter).
+- Hosted Terraform vars for the plan price IDs, meter name, and a generated
+  `BILLING_CRON_SECRET`. Migration `015_usage_watermark.sql`.
+
 ## [0.4.0] — Self-serve signup + Stripe billing (hosted)
 
 ### Added
@@ -98,7 +115,8 @@ First open-source release of the Sealfleet MCP Agent Platform.
 - GCP Terraform (`deploy/terraform/gcp`): GKE + Cloud SQL equivalent.
 - Docker Compose one-command local quickstart.
 
-[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.5.0
 [0.4.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.4.0
 [0.3.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.3.0
 [0.2.1]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.2.1

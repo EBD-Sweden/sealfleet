@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import crypto from "crypto";
-import { verifyWebhook } from "@/lib/stripe";
+import { verifyWebhook, availablePlans, planByKey } from "@/lib/stripe";
 import { isEntitled } from "@/lib/billing";
 import { slugify, generateApiKey } from "@/lib/provisioning";
 
@@ -53,6 +53,35 @@ describe("isEntitled", () => {
     expect(isEntitled("inactive")).toBe(false);
     expect(isEntitled(null)).toBe(false);
     expect(isEntitled(undefined)).toBe(false);
+  });
+});
+
+describe("availablePlans", () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  it("exposes only plans whose price ID is configured", () => {
+    delete process.env.STRIPE_PRICE_ENTERPRISE;
+    process.env.STRIPE_PRICE_HOSTED_MONTHLY = "price_m";
+    process.env.STRIPE_PRICE_HOSTED_USAGE = "price_u";
+    delete process.env.STRIPE_PRICE_HOSTED_ANNUAL;
+    const plans = availablePlans();
+    expect(plans.map((p) => p.key).sort()).toEqual(["monthly", "usage"]);
+    expect(planByKey("usage")?.metered).toBe(true);
+    expect(planByKey("monthly")?.metered).toBe(false);
+    expect(planByKey("annual")).toBeUndefined();
+  });
+
+  it("falls back to the legacy single price as monthly", () => {
+    delete process.env.STRIPE_PRICE_HOSTED_MONTHLY;
+    delete process.env.STRIPE_PRICE_HOSTED_ANNUAL;
+    delete process.env.STRIPE_PRICE_HOSTED_USAGE;
+    process.env.STRIPE_PRICE_ENTERPRISE = "price_legacy";
+    const plans = availablePlans();
+    expect(plans).toHaveLength(1);
+    expect(plans[0].priceId).toBe("price_legacy");
   });
 });
 

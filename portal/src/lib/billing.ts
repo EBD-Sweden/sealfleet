@@ -91,3 +91,41 @@ export async function usageCount(tenantId: string, since: Date): Promise<number>
   );
   return Number(rows[0]?.n ?? 0);
 }
+
+// Calls in the half-open window (from, to] — the increment the usage reporter
+// bills for. `from` null means "from the beginning".
+export async function usageCountBetween(tenantId: string, from: Date | null, to: Date): Promise<number> {
+  const { rows } = await pool.query<{ n: string }>(
+    `SELECT COUNT(*)::text AS n FROM api_key_usage_log
+     WHERE tenant_id = $1 AND created_at <= $3 AND ($2::timestamptz IS NULL OR created_at > $2)`,
+    [tenantId, from, to],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+export interface MeteredSub {
+  tenant_id: string;
+  stripe_customer_id: string;
+  usage_reported_through: string | null;
+}
+
+// Active/trialing subscriptions on the metered (usage) plan that have a Stripe
+// customer — the ones the reporter should push meter events for.
+export async function meteredSubscriptions(usagePriceId: string): Promise<MeteredSub[]> {
+  const { rows } = await pool.query<MeteredSub>(
+    `SELECT tenant_id, stripe_customer_id, usage_reported_through
+     FROM subscriptions
+     WHERE status IN ('active','trialing')
+       AND stripe_customer_id IS NOT NULL
+       AND plan = $1`,
+    [usagePriceId],
+  );
+  return rows;
+}
+
+export async function advanceUsageWatermark(tenantId: string, through: Date): Promise<void> {
+  await pool.query("UPDATE subscriptions SET usage_reported_through = $2 WHERE tenant_id = $1", [
+    tenantId,
+    through,
+  ]);
+}

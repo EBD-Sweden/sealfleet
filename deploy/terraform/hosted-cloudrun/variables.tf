@@ -26,7 +26,7 @@ variable "image_registry" {
 variable "image_tag" {
   description = "Image tag for all services. Pin to a release."
   type        = string
-  default     = "0.4.0"
+  default     = "0.5.0"
 }
 
 # --- Database (serverless Postgres, external — e.g. Neon / Supabase) --------
@@ -105,9 +105,46 @@ variable "stripe_webhook_secret" {
 }
 
 variable "stripe_price_enterprise" {
-  description = "Stripe recurring Price ID (price_…) for the Enterprise plan the Subscribe button checks out."
+  description = "Legacy single Stripe Price ID (price_…). Optional fallback if the per-plan IDs below are unset."
   type        = string
   default     = ""
+}
+
+variable "stripe_price_hosted_monthly" {
+  description = "Stripe Price ID for the Hosted Monthly plan (flat)."
+  type        = string
+  default     = ""
+}
+
+variable "stripe_price_hosted_annual" {
+  description = "Stripe Price ID for the Hosted Annual plan (flat)."
+  type        = string
+  default     = ""
+}
+
+variable "stripe_price_hosted_usage" {
+  description = "Stripe Price ID for the Hosted Usage-only plan (metered; backed by the meter below)."
+  type        = string
+  default     = ""
+}
+
+variable "stripe_meter_event_name" {
+  description = "Stripe Billing Meter event_name the usage reporter emits."
+  type        = string
+  default     = "sealfleet_api_calls"
+}
+
+variable "usage_report_schedule" {
+  description = "Cron schedule for the metered-usage reporter (Cloud Scheduler). Empty = don't create the job."
+  type        = string
+  default     = "0 * * * *" # hourly
+}
+
+variable "billing_cron_secret" {
+  description = "Shared secret the usage-report Cloud Scheduler job sends as x-billing-cron-secret. If empty a random secret is generated."
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 # --- Licensing (this hosted service is the Enterprise tier) ------------------

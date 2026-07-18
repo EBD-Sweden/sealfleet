@@ -14,7 +14,7 @@ image:
   registry: ghcr.io/ebd-sweden
   # -- Image tag applied to all services unless overridden per service. Pin to a
   #    released version; `latest` is only published from the default branch.
-  tag: "0.4.0"
+  tag: "0.5.0"
   # -- Optional immutable digest (e.g. "sha256:...") applied to all services;
   #    overrides tag. Per-service override via <svc>.digest.
   digest: ""
