@@ -23,8 +23,29 @@ Sealfleet lets organizations expose internal/external capabilities as agent-call
 
 ## Licensing
 
-Sealfleet is open-core: the platform is free (Apache-2.0); enterprise features
-(SSO/IdP, multi-user/tenant, SCIM) unlock with a license. See **[LICENSING.md](LICENSING.md)**.
+Sealfleet is **open-core**. The platform is free forever under Apache-2.0 — run
+it, modify it, self-host it, unlimited. A set of **enterprise features** ships
+in the same codebase and unlocks with a license:
+
+| | Free (Community) | Enterprise |
+|---|---|---|
+| Tools, pipelines, jobs, portal, audit, sealed credentials | ✅ | ✅ |
+| Users | 1 (local login) | Unlimited |
+| **SSO / OIDC / SAML + IdP group→role mapping** | — | ✅ |
+| **Multi-tenant, SCIM provisioning, advanced RBAC, audit export** | — | ✅ |
+
+See **[LICENSING.md](LICENSING.md)** for the full matrix and how it works.
+
+### Sealfleet Enterprise
+
+Enterprise unlocks single sign-on, multi-user/multi-tenant, SCIM, and advanced
+RBAC/audit — via a license key or an **AWS Marketplace** subscription. Apply a
+key by setting `SEALFLEET_LICENSE_KEY` (or `licensing.licenseKey` in Helm), then
+check `GET /license`.
+
+**Get a license / talk to us:** <!-- TODO: replace with your sales channel -->
+sales@sealfleet.io · or open a [GitHub discussion](https://github.com/EBD-Sweden/sealfleet/discussions).
+
 
 ## Deploying
 
