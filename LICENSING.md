@@ -123,7 +123,7 @@ customers' (already re-issued) keep working.
 - The **enterprise features** listed above require a paid **Sealfleet Enterprise
   license** for production use; the license key / marketplace entitlement is how
   that entitlement is granted and verified.
-- For enterprise licensing and pricing, contact **sales@sealfleet.ebdsweden.com**.
+- For enterprise licensing and pricing, contact **sales@sealfleet.example.com**.
 
 > The commercial terms for enterprise features are provided under a separate
 > agreement; this document describes the model, not the contract.

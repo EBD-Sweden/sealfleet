@@ -44,8 +44,7 @@ key by setting `SEALFLEET_LICENSE_KEY` (or `licensing.licenseKey` in Helm), then
 check `GET /license`.
 
 **Get a license / talk to us:** 
-sales@sealfleet.ebdsweden.com · or open a [GitHub discussion](https://github.com/EBD-Sweden/sealfleet/discussions).
-
+sales@sealfleet.example.com · or open a [GitHub discussion](https://github.com/EBD-Sweden/sealfleet/discussions).
 
 ## Deploying
 
@@ -53,6 +52,8 @@ sales@sealfleet.ebdsweden.com · or open a [GitHub discussion](https://github.co
 - **Your own cloud (BYOF):** one `terraform apply` provisions EKS/GKE + managed
   Postgres + secrets + ingress in **your** AWS or GCP account.
 - **Existing cluster:** `helm install` the chart with your managed Postgres.
+- **Hosted / managed service (scale-to-zero):** run it yourself on Cloud Run
+  at ~$0 idle — see [docs/HOSTED.md](docs/HOSTED.md).
 
 Full guide with prerequisites, secrets, TLS, upgrade/teardown, and a production
 checklist: **[docs/DEPLOY.md](docs/DEPLOY.md)**.

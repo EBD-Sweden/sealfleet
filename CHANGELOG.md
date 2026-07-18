@@ -6,6 +6,18 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — Hosted (scale-to-zero) deployment
+
+### Added
+- **Hosted / managed-service deployment** on Cloud Run
+  (`deploy/terraform/hosted-cloudrun/`): the platform runs with
+  `min_instances=0` (pay ~$0 while idle), new customers are tenants in a shared
+  serverless Postgres (Neon/Supabase) — no per-customer infrastructure. See
+  `docs/HOSTED.md` for the architecture, economics, and growth path.
+- Images are now **Cloud Run-native**: the entrypoints honor the injected
+  `$PORT` (falling back to `APP_PORT`), so the same images run on Cloud Run,
+  Kubernetes, and Compose unchanged.
+
 ## [0.2.1] — License key rotation & revocation
 
 ### Added
@@ -66,7 +78,8 @@ First open-source release of the Sealfleet MCP Agent Platform.
 - GCP Terraform (`deploy/terraform/gcp`): GKE + Cloud SQL equivalent.
 - Docker Compose one-command local quickstart.
 
-[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.3.0
 [0.2.1]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.2.1
 [0.2.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.2.0
 [0.1.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.1.0

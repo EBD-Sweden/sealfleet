@@ -20,7 +20,7 @@
 set -euo pipefail
 
 HOST="${APP_HOST:-0.0.0.0}"
-PORT="${APP_PORT:?APP_PORT must be set}"
+PORT="${PORT:-${APP_PORT:?APP_PORT or PORT must be set}}"
 MODULE="${APP_MODULE:?APP_MODULE must be set}"
 
 args=(uvicorn "$MODULE" --host "$HOST" --port "$PORT")

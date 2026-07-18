@@ -161,7 +161,7 @@ variable "image_registry" {
 variable "image_tag" {
   description = "Image tag for all services. Pin to a release; avoid 'latest' in prod."
   type        = string
-  default     = "0.2.1"
+  default     = "0.3.0"
 }
 
 variable "ingress_hosts" {
