@@ -15,6 +15,10 @@ locals {
   encryption_key           = var.encryption_key != "" ? var.encryption_key : random_password.encryption_key.result
   nextauth_secret          = var.nextauth_secret != "" ? var.nextauth_secret : random_password.nextauth_secret.result
   router_rs256_private_key = var.router_rs256_private_key != "" ? var.router_rs256_private_key : tls_private_key.router.private_key_pem
+  # The portal signs session JWTs with an RS256 key (PKCS8 PEM) and publishes the
+  # public half at /api/.well-known/jwks.json, which the router fetches to verify
+  # portal sessions. Reuse the same generated key in PKCS8 form.
+  nextauth_rs256_private_key = var.router_rs256_private_key != "" ? var.router_rs256_private_key : tls_private_key.router.private_key_pem_pkcs8
   billing_cron_secret      = var.billing_cron_secret != "" ? var.billing_cron_secret : random_password.billing_cron_secret.result
   image                    = { for s in ["runtime", "registry", "portal"] : s => "${var.image_registry}/sealfleet-${s}:${var.image_tag}" }
   # Create the usage-reporter schedule only if billing is on and a schedule is set.
@@ -48,8 +52,9 @@ locals {
   secrets = {
     DATABASE_URL             = var.database_url
     ENCRYPTION_KEY           = local.encryption_key
-    ROUTER_RS256_PRIVATE_KEY = local.router_rs256_private_key
-    NEXTAUTH_SECRET          = local.nextauth_secret
+    ROUTER_RS256_PRIVATE_KEY   = local.router_rs256_private_key
+    NEXTAUTH_RS256_PRIVATE_KEY = local.nextauth_rs256_private_key
+    NEXTAUTH_SECRET            = local.nextauth_secret
     BILLING_CRON_SECRET      = local.billing_cron_secret
   }
 }
@@ -242,6 +247,15 @@ resource "google_cloud_run_v2_service" "portal" {
         value_source {
           secret_key_ref {
             secret  = google_secret_manager_secret.s["NEXTAUTH_SECRET"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name = "NEXTAUTH_RS256_PRIVATE_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.s["NEXTAUTH_RS256_PRIVATE_KEY"].secret_id
             version = "latest"
           }
         }
