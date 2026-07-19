@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Search } from "lucide-react";
 import { UserMenu } from "@/components/user-menu";
 
-const PUBLIC_PATHS = ["/login"];
+const PUBLIC_PATHS = ["/login", "/signup"];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -17,15 +17,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { status } = useSession();
 
   const isPublicPath = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
+  // The root path is the public product landing for logged-out visitors.
+  const isLanding = pathname === "/";
 
   useEffect(() => {
-    if (status === "unauthenticated" && !isPublicPath) {
+    if (status === "unauthenticated" && !isPublicPath && !isLanding) {
       router.push("/login");
     }
-  }, [status, isPublicPath, router]);
+  }, [status, isPublicPath, isLanding, router]);
 
-  // Login page renders without the shell
+  // Auth pages render without the shell.
   if (isPublicPath) {
+    return <>{children}</>;
+  }
+
+  // The landing renders full-bleed (no app chrome) for anyone not signed in.
+  if (isLanding && status !== "authenticated") {
     return <>{children}</>;
   }
 

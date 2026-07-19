@@ -2,6 +2,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { dashboardStats, recentActivity } from "@/lib/mock-data";
 import { Server, Wrench, Users, Activity, Clock, ShieldOff } from "lucide-react";
+import { auth } from "@/auth";
+import { Landing } from "@/components/landing";
 
 const statCards = [
   { label: "Servers", value: dashboardStats.totalServers, icon: Server },
@@ -12,7 +14,11 @@ const statCards = [
   { label: "Policy Denials", value: dashboardStats.policyDenials, icon: ShieldOff },
 ];
 
-export default function DashboardPage() {
+export default async function Home() {
+  // Logged-out visitors (e.g. sealfleet.example.com) get the product landing;
+  // authenticated users get the dashboard.
+  const session = await auth();
+  if (!session?.user) return <Landing />;
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
