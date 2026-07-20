@@ -1,3 +1,4 @@
+import type { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -34,11 +35,11 @@ vi.mock("@/lib/billing", () => ({
 
 import { POST } from "@/app/api/billing/webhook/route";
 
-function req(): any {
+function req(): NextRequest {
   return {
     text: async () => "{}",
     headers: { get: () => "t=1,v1=abc" },
-  };
+  } as unknown as NextRequest;
 }
 
 beforeEach(() => {

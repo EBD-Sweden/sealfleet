@@ -30,12 +30,13 @@ jobs:
             sleep 5
           done
           curl -fsS http://localhost:8040/health
+          # Read the per-deployment operator key keygen generated — no hardcoded key.
+          echo "MCPF_KEY=$(docker compose exec -T portal cat /keys/runtime-api-key)" >> "$GITHUB_ENV"
 
       - name: ZAP — authenticated API scan (router OpenAPI)
         continue-on-error: true   # report findings; don't hard-fail the stage on warnings
-        env:
-          # Seeded local-dev operator key (scripts/001_create_api_keys.sql) — dev only.
-          MCPF_KEY: loHPxndS1CBmn-dLHBZwvliXV7ixPyWU_5hlZo-VwpA
+        # MCPF_KEY is exported to $GITHUB_ENV in "Bring up the stack" (read from the
+        # running stack), so it's never a hardcoded credential in this workflow.
         run: |
           docker run --rm --network host -v ${{ github.workspace }}:/zap/wrk:rw \
             ghcr.io/zaproxy/zaproxy:stable zap-api-scan.py \

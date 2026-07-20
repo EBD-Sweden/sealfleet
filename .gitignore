@@ -64,3 +64,9 @@ INTERNAL.md
 *.tfstate
 *.tfstate.*
 crash.log
+
+# Local gstack/browser-debug harness output (sandbox/browser logs only).
+.gstack/
+
+# local-only terraform backend (holds no secrets, but deployment-specific)
+deploy/terraform/hosted-cloudrun/backend.tf

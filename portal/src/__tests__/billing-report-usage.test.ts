@@ -1,3 +1,4 @@
+import type { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -24,8 +25,8 @@ vi.mock("@/lib/billing", () => ({
 
 import { POST } from "@/app/api/billing/report-usage/route";
 
-function req(secret?: string): any {
-  return { headers: { get: (h: string) => (h === "x-billing-cron-secret" ? secret : null) } };
+function req(secret?: string): NextRequest {
+  return { headers: { get: (h: string) => (h === "x-billing-cron-secret" ? secret : null) } } as unknown as NextRequest;
 }
 
 beforeEach(() => {

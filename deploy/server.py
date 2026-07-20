@@ -99,11 +99,11 @@ BUILDS_DIR = Path(
     os.getenv("MCPFINDER_BUILDS_DIR")
     or os.path.join(tempfile.gettempdir(), "mcpfinder-builds")
 )
-REGISTRY_PREFIX = "localhost:5050"
-K8S_REGISTRY_PREFIX = "mcpfinder-registry:5050"
+REGISTRY_PREFIX = os.getenv("REGISTRY_PREFIX", "localhost:5050")
+K8S_REGISTRY_PREFIX = os.getenv("K8S_REGISTRY_PREFIX", "mcpfinder-registry:5050")
 HOST_DATABASE_URL = os.getenv(
     "HOST_DATABASE_URL",
-    "postgresql://admin:admin@host.k3d.internal:54323/investdb",
+    "postgresql://admin:admin@host.k3d.internal:54323/mcpfinder",
 )
 
 

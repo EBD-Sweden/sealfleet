@@ -12,7 +12,8 @@ paths = [
   '''deploy/tests/.*''',
 ]
 regexes = [
-  # Seeded local-dev operator key (scripts/001_create_api_keys.sql) — dev only,
-  # documented in the quickstart and rotated out of any real deployment.
+  # The old local-dev operator key is no longer in the working tree (it's now
+  # generated per-deployment by the keygen service), but it remains in this
+  # private repo's GIT HISTORY, so it stays allowlisted to keep history scans green.
   '''loHPxndS1CBmn-dLHBZwvliXV7ixPyWU_5hlZo-VwpA''',
 ]
