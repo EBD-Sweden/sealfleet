@@ -20,8 +20,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 - Quickstart no longer ships a hardcoded, delegation-capable dev API key — it's
-  generated per-deployment by the keygen service. Scrubbed an `investdb` business
-  string from a default DSN and env-drove the deploy registry prefixes.
+  generated per-deployment by the keygen service. Scrubbed a business-specific
+  database name from a default DSN and env-drove the deploy registry prefixes.
 
 ## [0.5.1] — Portal landing page
 

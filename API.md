@@ -92,7 +92,7 @@ from mcpfinder_auth.enterprise import (
 
 ### Sealfleet CLI command/runtime interface
 
-`runtime/cli.py` is the canonical Sealfleet-specific MCP server Command Line Interface for local agents and operators (`python -m runtime.cli`). `scripts/mcpfinder_cli.py` and `scripts/mcpfinder-cli` are compatibility wrappers only. It is not a generic EBD Sweden CLI and intentionally rejects Aether/OpenSnow-scoped config.
+`runtime/cli.py` is the canonical Sealfleet-specific MCP server Command Line Interface for local agents and operators (`python -m runtime.cli`). `scripts/mcpfinder_cli.py` and `scripts/mcpfinder-cli` are compatibility wrappers only. It is not a generic EBD Sweden CLI and intentionally rejects other-product-scoped config.
 
 The CLI spans two backends and is precise about which command hits which one: the **runtime router** (`runtime_url`, default `:8040`) for invoke/registry/manifest/pipeline/job operations, and the **separate deploy service** (`deploy_url`, default `:8030`) for building/deploying MCPs from git. The router does not own the deploy surface and vice versa. Every backend-touching command supports `--dry-run` (prints the exact request/target without network access); the global `--json` flag emits structured JSON for both success and error. Secret-looking fields are always redacted, and control-plane/cluster operations fail honestly with structured errors and a non-zero exit when their tooling or backend is unreachable.
 

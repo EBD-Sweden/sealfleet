@@ -137,7 +137,7 @@ Expected result: the command prints a JSON receipt with `mode=public_demo`, `ten
 
 ### 2b. Run the Sealfleet CLI smoke path
 
-Sealfleet CLI is the project-specific Command Line Interface for agents/operators: it validates `mcpfinder.cli.config/v1`, checks runtime health, builds `/call` invocation payloads, and calls registry/manifest control-plane APIs. It is intentionally Sealfleet-only and rejects Aether/OpenSnow config bleed.
+Sealfleet CLI is the project-specific Command Line Interface for agents/operators: it validates `mcpfinder.cli.config/v1`, checks runtime health, builds `/call` invocation payloads, and calls registry/manifest control-plane APIs. It is intentionally Sealfleet-only and rejects other-product config bleed.
 
 ```bash
 runtime/.venv/bin/python -m runtime.cli --json contract

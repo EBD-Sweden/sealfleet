@@ -2,7 +2,7 @@
 
 Sealfleet CLI means the Sealfleet Command Line Interface: a deterministic command-line contract for agents and operators that need to validate Sealfleet-scoped config, check the runtime, invoke MCP tools, and use runtime control-plane APIs.
 
-This CLI is project-specific. It must not use Aether, OpenSnow, or other board/product names in config or command contracts.
+This CLI is project-specific. It must not use other board or product names in config or command contracts.
 
 ## Contract
 
@@ -39,7 +39,7 @@ Validate:
 runtime/.venv/bin/python -m runtime.cli --json validate --config ./mcpfinder-cli.json
 ```
 
-Validation rejects cross-project bleed such as `product: example-other-product` or other cross-product names.
+Validation rejects cross-project bleed such as `product: other-product` or foreign-scoped names.
 
 ## Deterministic no-backend smoke
 

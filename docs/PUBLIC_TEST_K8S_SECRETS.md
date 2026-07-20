@@ -8,13 +8,13 @@ Required Secret objects and keys:
 
 | Secret object | Required keys | Consumers |
 | --- | --- | --- |
-| `mcpfinder-database` | `DATABASE_URL` | router, registry, deploy, portal, external cron jobs |
+| `mcpfinder-database` | `DATABASE_URL` | router, registry, deploy, portal, example cron jobs |
 | `mcpfinder-runtime-auth` | `NEXTAUTH_SECRET`, `ENCRYPTION_KEY` | router |
 | `mcpfinder-portal-auth` | `NEXTAUTH_SECRET` | portal |
 | `mcpfinder-llm` | `LLM_API_KEY` | router planner integration |
 | `mcpfinder-core-agent` | `OPENAI_API_KEY` | core-agent |
 | `mcpfinder-anthropic` | `ANTHROPIC_API_KEY` | core agent / LLM-backed MCPs |
-| `mcpfinder-investdb` | `INVESTDB_URL` | universe screener MCP |
+| `mcpfinder-example` | `EXAMPLE_URL` | an example MCP |
 
 Public-test guardrails:
 
