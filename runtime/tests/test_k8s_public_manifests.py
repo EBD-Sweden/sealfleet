@@ -9,17 +9,15 @@ PUBLIC_MANIFESTS = sorted(
     for path in REPO_ROOT.joinpath("k8s").rglob("*.yaml")
     if "dev-local" not in path.parts
 )
+# Generic secret-like env names that must never appear inline in a PUBLIC k8s
+# manifest. Product-neutral on purpose — no internal service names here.
 SECRET_LIKE_ENV_NAMES = {
     "DATABASE" + "_URL",
     "DB" + "_URL",
-    "INVESTDB" + "_URL",
     "NEXTAUTH" + "_SECRET",
     "LLM" + "_API" + "_KEY",
-    "FMP" + "_API" + "_KEY",
     "OPENAI" + "_API" + "_KEY",
     "ANTHROPIC" + "_API" + "_KEY",
-    "TELEGRAM" + "_BOT" + "_TOKEN",
-    "OPENCLAW" + "_HOOKS" + "_TOKEN",
     "ENCRYPTION" + "_KEY",
 }
 FORBIDDEN_TEXT = (

@@ -37,7 +37,16 @@ _ALLOWED_SCOPES = {
     "deploy",
     "cluster",
 }
-_CROSS_PROJECT_MARKERS = ("example-other-product",)
+# Extra name-substrings that mark a config as belonging to a DIFFERENT product and
+# must be rejected. Empty by default (the product!="mcpfinder" check below is the
+# real guard); operators running a multi-product fleet can set
+# MCPFINDER_CROSS_PROJECT_MARKERS=foo,bar to also reject by name. No project names
+# are hardcoded here so the public kit stays product-neutral.
+_CROSS_PROJECT_MARKERS = tuple(
+    m.strip().lower()
+    for m in os.environ.get("MCPFINDER_CROSS_PROJECT_MARKERS", "").split(",")
+    if m.strip()
+)
 _SECRET_KEY_PARTS = (
     "api_key",
     "apikey",
@@ -143,7 +152,7 @@ def _validate_project_markers(data: dict[str, Any], *, target: str) -> None:
     if product != "mcpfinder" or any(marker in name for marker in _CROSS_PROJECT_MARKERS):
         raise CliError(
             "project_scope_violation",
-            "CLI config must be scoped to product=mcpfinder and must not reference Aether/OpenSnow project surfaces",
+            "CLI config must be scoped to product=mcpfinder and must not reference other products' surfaces",
             target=target,
             detail={"product": data.get("product"), "name": data.get("name")},
         )
@@ -280,7 +289,7 @@ def contract_payload() -> dict[str, Any]:
                 "cancel": "POST /jobs/{job_id}/cancel",
             },
             "agent_contract": {
-                "project_scope": "mcpfinder only; no Aether/OpenSnow CLI naming or config bleed",
+                "project_scope": "mcpfinder only; no cross-project CLI naming or config bleed",
                 "secrets": "never pass raw secrets in prompts or payload logs",
                 "failure_semantics": "control-plane calls return not_implemented/backend_unavailable/auth_missing errors instead of success-looking stubs",
                 "auditability": "runtime calls should preserve trace_id/audit events returned by the router",

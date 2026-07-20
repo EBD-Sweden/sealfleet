@@ -116,12 +116,12 @@ def test_validate_accepts_real_mcpfinder_config_and_redacts_secret_fields(tmp_pa
 
 
 def test_validate_rejects_cross_project_cli_config(tmp_path: Path):
-    config = tmp_path / "other-product-cli.json"
+    config = tmp_path / "external-cli.json"
     config.write_text(
         json.dumps(
             {
                 "schema": "mcpfinder.cli.config/v1",
-                "product": "example-other-product",
+                "product": "external",
                 "runtime_url": "http://localhost:8040",
                 "allowed_scopes": ["runtime"],
             }

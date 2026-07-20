@@ -6,6 +6,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] — Product-neutral public kit (scrub internal project names)
+
+### Fixed
+- Removed all internal EBD project names from the public platform kit: the CLI
+  cross-project guard is now env-driven (`MCPFINDER_CROSS_PROJECT_MARKERS`, empty
+  default) with generic messages; the agents-page subtitle, docs/test-console
+  example names, and the k8s anti-bleed guard list are product-neutral; dropped a
+  stale `.gitignore` entry. No functional change; the public repo no longer
+  references any internal service.
+
 ## [0.5.2] — Security hardening (hardcoded-value audit)
 
 ### Fixed
@@ -134,7 +144,8 @@ First open-source release of the Sealfleet MCP Agent Platform.
 - GCP Terraform (`deploy/terraform/gcp`): GKE + Cloud SQL equivalent.
 - Docker Compose one-command local quickstart.
 
-[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.5.3
 [0.5.2]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.5.2
 [0.5.1]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.5.1
 [0.5.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.5.0

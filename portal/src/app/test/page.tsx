@@ -277,7 +277,7 @@ export default function TestConsolePage() {
                 onChange={(e) => setApiKey(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                Stored in localStorage. Required for external tool credentials.
+                Stored in localStorage. Required for some servers.
               </p>
             </div>
 

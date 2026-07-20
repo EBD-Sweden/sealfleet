@@ -323,7 +323,7 @@ export default function AgentsPage() {
             Agents Dashboard
           </h1>
           <p className="text-muted-foreground mt-1 text-sm">
-            OpenClaw fleet — real-time status &amp; scheduled pipelines
+            Agent fleet — real-time status &amp; scheduled pipelines
           </p>
         </div>
         <div className="flex items-center gap-3">

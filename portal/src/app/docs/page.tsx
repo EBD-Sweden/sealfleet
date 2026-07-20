@@ -296,7 +296,7 @@ function QuickStartSection() {
           <div className="pb-6">
             <h3 className="text-sm font-semibold">Test a tool live</h3>
             <p className="mt-1 text-xs text-muted-foreground">
-              Go to Test Console. Select a server (e.g., Demo Sandbox),
+              Go to Test Console. Select a server (e.g., Acme Financial),
               pick a tool, fill in the form, and click Run. See the live JSON
               response.
             </p>
@@ -538,7 +538,7 @@ function TestConsoleSection() {
             <tbody>
               <tr className="border-b">
                 <td className="px-4 py-2 font-medium">
-                  Demo Sandbox
+                  Acme Financial
                 </td>
                 <td className="px-4 py-2 text-muted-foreground">
                   19 tools (stock data, options, analysis)

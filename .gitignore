@@ -35,9 +35,6 @@ htmlcov/
 *.tmp
 *.bak
 *.swp
-# Out-of-scope on the public branch only (kept in this private repo)
-pitch/
-evidinvest/
 # Local agent/harness state
 .claude/
 # TLS material — never commit private keys or generated certs/Secrets.
