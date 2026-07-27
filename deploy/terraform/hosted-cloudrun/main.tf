@@ -118,6 +118,39 @@ resource "google_secret_manager_secret_iam_member" "stripe_accessor" {
   member    = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
 }
 
+# Optional AWS creds for Marketplace ResolveCustomer/GetEntitlements (portal).
+locals {
+  aws_values = {
+    AWS_ACCESS_KEY_ID     = var.aws_access_key_id
+    AWS_SECRET_ACCESS_KEY = var.aws_secret_access_key
+  }
+  aws_keys = toset(concat(
+    nonsensitive(var.aws_access_key_id != "") ? ["AWS_ACCESS_KEY_ID"] : [],
+    nonsensitive(var.aws_secret_access_key != "") ? ["AWS_SECRET_ACCESS_KEY"] : [],
+  ))
+}
+
+resource "google_secret_manager_secret" "aws" {
+  for_each  = local.aws_keys
+  secret_id = "${var.name}-${lower(replace(each.value, "_", "-"))}"
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "aws" {
+  for_each    = local.aws_keys
+  secret      = google_secret_manager_secret.aws[each.value].id
+  secret_data = local.aws_values[each.value]
+}
+
+resource "google_secret_manager_secret_iam_member" "aws_accessor" {
+  for_each  = local.aws_keys
+  secret_id = google_secret_manager_secret.aws[each.value].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
+}
+
 # ---------------------------------------------------------------------------
 # Registry (discovery) — internal, scale-to-zero.
 # ---------------------------------------------------------------------------
@@ -304,6 +337,29 @@ resource "google_cloud_run_v2_service" "portal" {
           value = env.value
         }
       }
+      # AWS Marketplace fulfillment (portal): creds as secrets; product code + region plain.
+      dynamic "env" {
+        for_each = local.aws_keys
+        content {
+          name = env.value
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.aws[env.value].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+      dynamic "env" {
+        for_each = var.aws_marketplace_product_code != "" ? {
+          SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE = var.aws_marketplace_product_code
+          AWS_MARKETPLACE_REGION                 = var.aws_marketplace_region
+        } : {}
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
       # Shared secret for the usage-report cron endpoint.
       env {
         name = "BILLING_CRON_SECRET"
@@ -316,7 +372,7 @@ resource "google_cloud_run_v2_service" "portal" {
       }
     }
   }
-  depends_on = [google_secret_manager_secret_version.v, google_secret_manager_secret_version.stripe]
+  depends_on = [google_secret_manager_secret_version.v, google_secret_manager_secret_version.stripe, google_secret_manager_secret_version.aws]
 }
 
 # ---------------------------------------------------------------------------

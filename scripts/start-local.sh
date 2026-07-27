@@ -8,7 +8,7 @@
 #   ./scripts/start-local.sh --status Show status of all services
 #
 # Optional DB override:
-#   DATABASE_URL=postgresql://admin:***@localhost:54323/mcpfinder ./scripts/start-local.sh
+#   PGPASSWORD=admin ./scripts/start-local.sh
 #
 # Services started:
 #   registry            :8010  (FastAPI)

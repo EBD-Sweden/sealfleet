@@ -44,40 +44,10 @@ services:
   # portal sessions and router JWT validation keep working across reboots.
   keygen:
     build: {context: ./runtime}   # reuses the router image (python + cryptography); no extra pull
-    entrypoint: ["python", "-c"]
-    command:
-      - |
-        import base64, os, secrets
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-
-        def gen_rsa(path):
-            if os.path.exists(path):
-                return
-            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            pem = key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.PKCS8,
-                serialization.NoEncryption(),
-            )
-            with open(path, "wb") as f:
-                f.write(pem)
-
-        def gen_secret(path):
-            if os.path.exists(path):
-                return
-            with open(path, "w") as f:
-                f.write(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())
-
-        gen_rsa("/keys/portal-rs256.pem")
-        gen_rsa("/keys/router-rs256.pem")
-        gen_secret("/keys/nextauth-secret")
-        gen_secret("/keys/encryption-key")
-        gen_secret("/keys/runtime-api-key")  # per-deployment operator key (never hardcoded)
-        for name in os.listdir("/keys"):
-            os.chmod(os.path.join("/keys", name), 0o600)
-        print("auth keys ready")
+    user: "0:0"                  # named volumes start root-owned; keygen fixes readable local-dev modes
+    command: ["python", "/scripts/compose-keygen.py"]
     volumes:
+      - ./scripts:/scripts:ro
       - sealfleet_keys:/keys
     restart: "no"
 

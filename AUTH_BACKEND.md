@@ -127,7 +127,7 @@ YAML-declared gate. Pure service API keys are not subject to manifest gating.
 | `PORTAL_JWT_ISSUER` / `NEXTAUTH_ISSUER` | Yes in production/public-test | Expected portal session JWT issuer; production-like deployments reject portal JWT validation when omitted |
 | `PORTAL_JWT_AUDIENCE` / `NEXTAUTH_AUDIENCE` | Yes in production/public-test | Expected portal session JWT audience; production-like deployments reject portal JWT validation when omitted |
 | `MCPFINDER_DEPLOYMENT_ENV` / `DEPLOYMENT_ENV` / `ENVIRONMENT` / `APP_ENV` / `NODE_ENV` | Recommended | Values `production`, `prod`, or `public-test` force persistent router keys and portal JWT issuer/audience config |
-| `DATABASE_URL` | No (default `postgresql://admin:***@localhost:54323/mcpfinder`) | PostgreSQL connection |
+| `DATABASE_URL` | No (default `postgresql://admin:admin@localhost:54323/mcpfinder`) | PostgreSQL connection |
 
 ## Files Changed
 

@@ -140,3 +140,28 @@ session), so schedule it however you like:
   header.
 
 Tune the rate on the meter's price (`sealfleet_hosted_usage`, €49/1M by default).
+
+## AWS Marketplace (SaaS fulfillment)
+
+A second paid channel: customers subscribe on AWS Marketplace and pay on their AWS
+bill. Flow (mirrors the Stripe access model):
+
+1. After subscribing, AWS POSTs the buyer to **`/api/aws-marketplace`** with
+   `x-amzn-marketplace-token`. We call **ResolveCustomer**, stash a signed cookie,
+   and redirect to **`/aws-marketplace`** to register.
+2. Registration (**`/api/aws-marketplace/register`**) creates the tenant, links the
+   AWS `CustomerIdentifier`, and checks **GetEntitlements**.
+3. **`/api/aws-marketplace/notification`** (SNS, signature-verified) flips the
+   tenant's API keys active/inactive on `subscribe-success` / `unsubscribe-*`.
+
+Schema: `db/migrations/016_aws_marketplace.sql` (`aws_marketplace_customers`).
+Code: `portal/src/lib/aws-marketplace.ts` + the routes above. Uses the AWS SDK
+(`@aws-sdk/client-marketplace-metering`, `-entitlement-service`).
+
+**Config (portal env):** `SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE`,
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (IAM user scoped to
+`aws-marketplace:ResolveCustomer` + `GetEntitlements`), `AWS_MARKETPLACE_REGION`
+(us-east-1). Hosted Terraform: `aws_marketplace_product_code`,
+`aws_access_key_id`/`aws_secret_access_key` (→ Secret Manager). Point the AWS
+Marketplace product's **fulfillment URL** at `https://<portal>/api/aws-marketplace`
+and its **SNS topic** at `https://<portal>/api/aws-marketplace/notification`.

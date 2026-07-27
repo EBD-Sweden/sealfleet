@@ -30,7 +30,7 @@ The portal uses **next-auth v5 (beta)** with a Credentials provider for email/pa
 | `PLATFORM_SSO_ALLOWED_EMAILS` | Comma-separated invite allowlist for platform-tenant Google/Azure fallback. | `alice@example.com,bob@example.com` |
 | `PLATFORM_SSO_ALLOWED_DOMAINS` | Comma-separated domain allowlist for platform-tenant Google/Azure fallback. | `example.com` |
 | `AUTH_ALLOW_DANGEROUS_EMAIL_ACCOUNT_LINKING` | Optional explicit opt-in for Auth.js email account linking across providers. Default is disabled. | `false` |
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://admin:***@localhost:54323/mcpfinder` |
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://admin:admin@localhost:54323/mcpfinder` |
 
 ## JWT Payload Shape
 

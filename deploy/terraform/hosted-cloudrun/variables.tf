@@ -147,6 +147,34 @@ variable "billing_cron_secret" {
   sensitive   = true
 }
 
+# --- AWS Marketplace (SaaS fulfillment + entitlement) -----------------------
+
+variable "aws_marketplace_product_code" {
+  description = "AWS Marketplace SaaS Product Code. Empty = AWS Marketplace disabled. (Portal fulfillment + router entitlement.)"
+  type        = string
+  default     = ""
+}
+
+variable "aws_access_key_id" {
+  description = "AWS access key id for Marketplace ResolveCustomer/GetEntitlements (IAM user scoped to marketplace perms). Stored in Secret Manager."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aws_secret_access_key" {
+  description = "AWS secret access key paired with aws_access_key_id. Stored in Secret Manager."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aws_marketplace_region" {
+  description = "AWS region for Marketplace APIs."
+  type        = string
+  default     = "us-east-1"
+}
+
 # --- Licensing (this hosted service is the Enterprise tier) ------------------
 
 variable "license_public_key" {

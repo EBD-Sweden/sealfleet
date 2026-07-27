@@ -13,6 +13,12 @@ const PUBLIC_EXACT_PATHS = new Set([
   "/api/billing/webhook",
   // The usage-report cron calls this with a shared-secret header, not a session.
   "/api/billing/report-usage",
+  // AWS Marketplace fulfillment: AWS posts the token; SNS posts notifications;
+  // registration is gated by a signed cookie, not a session.
+  "/aws-marketplace",
+  "/api/aws-marketplace",
+  "/api/aws-marketplace/register",
+  "/api/aws-marketplace/notification",
 ]);
 
 // Deployments may whitelist additional exact public paths (e.g. an OAuth

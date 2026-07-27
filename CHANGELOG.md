@@ -6,6 +6,17 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] — AWS Marketplace SaaS fulfillment
+
+### Added
+- **AWS Marketplace fulfillment**: buyers who subscribe on AWS Marketplace land on
+  `/api/aws-marketplace` (ResolveCustomer), register at `/aws-marketplace` (creates
+  + links a tenant, checks GetEntitlements), and an SNS handler
+  (`/api/aws-marketplace/notification`, signature-verified) activates/deactivates
+  the tenant on subscription changes. Migration `016_aws_marketplace.sql`;
+  `portal/src/lib/aws-marketplace.ts`. Config via `SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE`
+  + AWS creds; hosted Terraform wires them to Secret Manager.
+
 ## [0.5.3] — Product-neutral public kit (scrub internal project names)
 
 ### Fixed
@@ -144,7 +155,8 @@ First open-source release of the Sealfleet MCP Agent Platform.
 - GCP Terraform (`deploy/terraform/gcp`): GKE + Cloud SQL equivalent.
 - Docker Compose one-command local quickstart.
 
-[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/EBD-Sweden/sealfleet/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.6.0
 [0.5.3]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.5.3
 [0.5.2]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.5.2
 [0.5.1]: https://github.com/EBD-Sweden/sealfleet/releases/tag/v0.5.1

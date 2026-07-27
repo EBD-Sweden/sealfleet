@@ -8,10 +8,13 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "audit:prod": "npm audit --omit=dev --json | node scripts/audit-prod.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.79.0",
+    "@anthropic-ai/sdk": "0.113.0",
+    "@aws-sdk/client-marketplace-entitlement-service": "^3.1095.0",
+    "@aws-sdk/client-marketplace-metering": "^3.1095.0",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
@@ -22,8 +25,8 @@
     "clsx": "^2.1.1",
     "jose": "^6.2.2",
     "lucide-react": "^0.575.0",
-    "next": "16.2.6",
-    "next-auth": "^5.0.0-beta.30",
+    "next": "16.2.11",
+    "next-auth": "^5.0.0-beta.32",
     "pg": "^8.20.0",
     "radix-ui": "^1.4.3",
     "react": "19.2.3",
