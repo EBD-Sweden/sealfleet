@@ -58,10 +58,18 @@ const navItems = [
 // platform default contributes nothing.
 const allNavItems = [...navItems, ...extraNavItems];
 
+// Org-level admin: the account owner manages the people in their own
+// organization, whether invited directly or provisioned through their IdP.
 const adminItems = [
-  { title: "Tenants", href: "/admin/tenants", icon: Building2 },
   { title: "Roles", href: "/admin/roles", icon: Shield },
   { title: "Users", href: "/admin/users", icon: Users },
+];
+
+// Platform-operator only. The tenant list spans every customer, so
+// /api/admin/tenants requires platform_admin on the platform tenant; a customer
+// clicking this would only ever get a 403.
+const platformItems = [
+  { title: "Tenants", href: "/admin/tenants", icon: Building2 },
 ];
 
 export function AppSidebar() {
@@ -69,6 +77,8 @@ export function AppSidebar() {
   const { data: session } = useSession();
 
   const isAdmin = session?.user?.is_admin === true;
+  const isPlatformAdmin = session?.user?.is_platform_admin === true;
+  const visibleAdminItems = isPlatformAdmin ? [...platformItems, ...adminItems] : adminItems;
 
   return (
     <Sidebar>
@@ -111,7 +121,7 @@ export function AppSidebar() {
             </SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {adminItems.map((item) => {
+                {visibleAdminItems.map((item) => {
                   const isActive = pathname.startsWith(item.href);
                   return (
                     <SidebarMenuItem key={item.href}>

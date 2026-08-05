@@ -1,10 +1,24 @@
 FROM python:3.12-slim
 
-# Install docker CLI + git (needed for deploy operations)
+# git + the docker CLI (needed for deploy operations).
+#
+# Only the `docker` client binary is installed, not the engine. server.py shells
+# out to `docker build`/`docker push` as a client against an external daemon, so
+# dockerd/containerd/runc are never executed here — and shipping them pulled in
+# their embedded Go dependencies (containerd CVE-2026-53488/53489, grpc
+# GHSA-hrxh-6v49-42gf) with no runtime benefit. This also replaces piping
+# get.docker.com straight into a shell with a pinned, checksum-verified download.
+ARG DOCKER_CLI_VERSION=29.6.2
+ARG DOCKER_CLI_SHA256=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
-    && curl -fsSL https://get.docker.com | sh \
+    && curl -fsSL -o /tmp/docker.tgz \
+       "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+    && echo "${DOCKER_CLI_SHA256}  /tmp/docker.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/docker.tgz -C /tmp docker/docker \
+    && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
+    && rm -rf /tmp/docker.tgz /tmp/docker \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

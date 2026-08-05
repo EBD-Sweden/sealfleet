@@ -86,6 +86,28 @@ function isPlatformAdminRole(role: AdminRoleRow): boolean {
   );
 }
 
+// Platform operator, as distinct from an admin of one's own tenant. Every
+// self-serve signup receives a tenant-scoped `admin` role, so `is_admin` is true
+// for every customer and cannot gate platform-only surfaces (the tenant list).
+// Resolved once when the token is minted at sign-in, not per request.
+async function resolvePlatformAdmin(userId: string, email: string | null): Promise<boolean> {
+  try {
+    if (email && isPlatformAdminEmail(email)) return true;
+    const { rows } = await pool.query<AdminRoleRow>(
+      `SELECT r.name, r.tenant_id, t.slug AS tenant_slug FROM roles r
+       JOIN user_roles ur ON ur.role_id = r.id
+       LEFT JOIN tenants t ON t.id = r.tenant_id
+       WHERE ur.user_id = $1 AND r.name = 'platform_admin'`,
+      [userId],
+    );
+    return rows.some((row) => isPlatformAdminRole(row));
+  } catch (err) {
+    // Fail closed: a lookup failure must not confer platform access.
+    console.error("[Auth] resolvePlatformAdmin failed for user:", userId, err);
+    return false;
+  }
+}
+
 function normalizeEmail(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const email = value.trim().toLowerCase();
@@ -806,12 +828,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return true;
     },
 
-    jwt({ token, user }) {
+    async jwt({ token, user }) {
       if (user) {
         token.user_id = user.id as string;
         token.tenant_id = user.tenant_id;
         token.is_admin = user.is_admin;
         token.email = user.email as string;
+        // Every provider path converges here, so platform-admin is derived once
+        // in one place rather than threaded through each provider's return.
+        token.is_platform_admin = await resolvePlatformAdmin(
+          user.id as string,
+          normalizeEmail(user.email),
+        );
         if (Array.isArray(user.groups) && user.groups.length > 0) {
           token.groups = user.groups;
         }
@@ -823,6 +851,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         session.user.id = token.user_id;
         session.user.tenant_id = token.tenant_id;
         session.user.is_admin = token.is_admin;
+        session.user.is_platform_admin = token.is_platform_admin === true;
         session.user.email = token.email;
         if (Array.isArray(token.groups) && token.groups.length > 0) {
           session.user.groups = token.groups;

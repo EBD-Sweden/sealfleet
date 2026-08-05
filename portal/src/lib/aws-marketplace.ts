@@ -1,7 +1,11 @@
-// AWS Marketplace SaaS fulfillment: resolve the buyer (ResolveCustomer), confirm
-// entitlement (GetEntitlements), map the AWS customer to a Sealfleet tenant, and
-// track subscription status from SNS notifications. Access enforcement reuses the
-// billing model: the tenant's API keys' is_active follows the subscription.
+// AWS Marketplace fulfillment for the SELF-HOST license model.
+//
+// AWS Marketplace sells a self-host license — the customer runs Sealfleet in their
+// OWN infra (BYOF terraform); we run nothing for them on AWS. On subscribe we
+// resolve the buyer (ResolveCustomer), record their contact details, confirm the
+// entitlement (GetEntitlements / SNS), and NOTIFY the operator, who issues a
+// signed license token OFFLINE (the private key never touches a server) and sends
+// it to the buyer. aws_marketplace_customers is the operator's work queue.
 
 import {
   MarketplaceMeteringClient,
@@ -25,26 +29,48 @@ export function awsMarketplaceConfigured(): boolean {
 }
 
 export interface ResolvedCustomer {
+  /** Subscription key: the LicenseArn for new agreements, CustomerIdentifier for legacy ones. */
   customerIdentifier: string;
   awsAccountId?: string;
-  productCode: string;
+  productCode?: string;
+  licenseArn?: string;
 }
 
 // --- AWS API calls ---------------------------------------------------------
 
+// Concurrent Agreements: a buyer may hold several simultaneous agreements for
+// one product in a single AWS account, so the agreement's LicenseArn — not the
+// customer — is the subscription identity. AWS requires this of every SaaS
+// product created since 2026-06-01, and for those products ResolveCustomer no
+// longer populates CustomerIdentifier or ProductCode at all. Requiring them
+// would therefore fail every real purchase.
 export async function resolveCustomer(token: string): Promise<ResolvedCustomer> {
   const client = new MarketplaceMeteringClient({ region: REGION });
   const r = await client.send(new ResolveCustomerCommand({ RegistrationToken: token }));
-  if (!r.CustomerIdentifier || !r.ProductCode) throw new Error("ResolveCustomer returned no customer");
-  return { customerIdentifier: r.CustomerIdentifier, awsAccountId: r.CustomerAWSAccountId, productCode: r.ProductCode };
+  const key = r.LicenseArn ?? r.CustomerIdentifier;
+  if (!key) throw new Error("ResolveCustomer returned neither LicenseArn nor CustomerIdentifier");
+  return {
+    customerIdentifier: key,
+    awsAccountId: r.CustomerAWSAccountId,
+    productCode: r.ProductCode,
+    licenseArn: r.LicenseArn,
+  };
 }
 
-export async function hasActiveEntitlement(customerIdentifier: string): Promise<boolean> {
+// Entitlement lookup for one agreement. Only the filter differs: new agreements
+// are looked up by LICENSE_ARN, legacy ones by CUSTOMER_IDENTIFIER. ProductCode
+// stays required on the request either way — unlike BatchMeterUsage, which
+// rejects it alongside a LicenseArn.
+export async function hasActiveEntitlement(subscriptionKey: string): Promise<boolean> {
   const pc = productCode();
   if (!pc) return false;
+  const byLicense = subscriptionKey.startsWith("arn:");
   const client = new MarketplaceEntitlementServiceClient({ region: REGION });
   const r = await client.send(
-    new GetEntitlementsCommand({ ProductCode: pc, Filter: { CUSTOMER_IDENTIFIER: [customerIdentifier] } }),
+    new GetEntitlementsCommand({
+      ProductCode: pc,
+      Filter: byLicense ? { LICENSE_ARN: [subscriptionKey] } : { CUSTOMER_IDENTIFIER: [subscriptionKey] },
+    }),
   );
   const now = Date.now();
   return (r.Entitlements ?? []).some(
@@ -54,47 +80,115 @@ export async function hasActiveEntitlement(customerIdentifier: string): Promise<
 
 // --- DB helpers ------------------------------------------------------------
 
-export type AwsStatus = "pending" | "active" | "unsubscribe_pending" | "unsubscribed";
+export type AwsStatus = "pending" | "registered" | "active" | "unsubscribe_pending" | "unsubscribed";
+
+export interface AwsCustomerRow {
+  customer_identifier: string;
+  product_code: string;
+  aws_account_id: string | null;
+  org_name: string | null;
+  contact_name: string | null;
+  contact_email: string | null;
+  status: AwsStatus;
+  license_issued: boolean;
+}
 
 export async function upsertPendingCustomer(c: ResolvedCustomer): Promise<void> {
+  const pc = c.productCode ?? productCode();
   await pool.query(
-    `INSERT INTO aws_marketplace_customers (customer_identifier, product_code, aws_account_id, status)
-     VALUES ($1, $2, $3, 'pending')
+    `INSERT INTO aws_marketplace_customers
+       (customer_identifier, product_code, aws_account_id, license_arn, customer_aws_account_id, status)
+     VALUES ($1, $2, $3, $4, $5, 'pending')
      ON CONFLICT (customer_identifier) DO UPDATE SET
-       product_code = EXCLUDED.product_code, aws_account_id = EXCLUDED.aws_account_id, updated_at = NOW()`,
-    [c.customerIdentifier, c.productCode, c.awsAccountId ?? null],
+       product_code = EXCLUDED.product_code,
+       aws_account_id = EXCLUDED.aws_account_id,
+       license_arn = EXCLUDED.license_arn,
+       customer_aws_account_id = EXCLUDED.customer_aws_account_id,
+       updated_at = NOW()`,
+    [c.customerIdentifier, pc, c.awsAccountId ?? null, c.licenseArn ?? null, c.awsAccountId ?? null],
   );
 }
 
-export async function linkCustomerToTenant(customerIdentifier: string, tenantId: string, status: AwsStatus): Promise<void> {
+// Buyer submitted their contact details at the fulfillment page. Records them and
+// moves the row to 'registered' (awaiting entitlement confirmation + license issue).
+export async function registerSelfHostContact(
+  customerIdentifier: string,
+  contact: { org: string; email: string; name?: string },
+): Promise<void> {
   await pool.query(
-    `UPDATE aws_marketplace_customers SET tenant_id = $2, status = $3, updated_at = NOW()
+    `UPDATE aws_marketplace_customers
+       SET org_name = $2, contact_email = $3, contact_name = $4,
+           status = CASE WHEN status = 'active' THEN 'active' ELSE 'registered' END,
+           updated_at = NOW()
      WHERE customer_identifier = $1`,
-    [customerIdentifier, tenantId, status],
+    [customerIdentifier, contact.org, contact.email, contact.name ?? null],
   );
 }
 
-export async function setAwsStatus(customerIdentifier: string, status: AwsStatus): Promise<string | null> {
-  const { rows } = await pool.query<{ tenant_id: string | null }>(
+export async function setAwsStatus(customerIdentifier: string, status: AwsStatus): Promise<void> {
+  await pool.query(
     `UPDATE aws_marketplace_customers SET status = $2, updated_at = NOW()
-     WHERE customer_identifier = $1 RETURNING tenant_id`,
+     WHERE customer_identifier = $1`,
     [customerIdentifier, status],
   );
-  return rows[0]?.tenant_id ?? null;
 }
 
-export async function getAwsCustomer(customerIdentifier: string):
-  Promise<{ tenant_id: string | null; status: AwsStatus } | null> {
-  const { rows } = await pool.query<{ tenant_id: string | null; status: AwsStatus }>(
-    "SELECT tenant_id, status FROM aws_marketplace_customers WHERE customer_identifier = $1",
+export async function markOperatorNotified(customerIdentifier: string): Promise<void> {
+  await pool.query(
+    "UPDATE aws_marketplace_customers SET operator_notified_at = NOW(), updated_at = NOW() WHERE customer_identifier = $1",
+    [customerIdentifier],
+  );
+}
+
+export async function getAwsCustomer(customerIdentifier: string): Promise<AwsCustomerRow | null> {
+  const { rows } = await pool.query<AwsCustomerRow>(
+    `SELECT customer_identifier, product_code, aws_account_id, org_name, contact_name,
+            contact_email, status, license_issued
+       FROM aws_marketplace_customers WHERE customer_identifier = $1`,
     [customerIdentifier],
   );
   return rows[0] ?? null;
 }
 
 export function awsStatusIsEntitled(status: string | null | undefined): boolean {
-  // Keep access during the unsubscribe grace window; cut it only once gone.
+  // Keep entitlement during the unsubscribe grace window; drop it only once gone.
   return status === "active" || status === "unsubscribe_pending";
+}
+
+// --- Operator notification -------------------------------------------------
+// Self-host licenses are issued offline (private key is operator-held), so the
+// fulfillment flow's job is to alert a human that a license must be issued or
+// revoked. The DB row is the durable queue; this adds an optional push (a Slack /
+// generic webhook, or logged if unset). Never throws — notification is best-effort.
+
+export interface OperatorAlert {
+  event: "license-requested" | "entitlement-confirmed" | "unsubscribe";
+  customerIdentifier: string;
+  awsAccountId?: string | null;
+  org?: string | null;
+  email?: string | null;
+  note?: string;
+}
+
+export async function notifyOperator(alert: OperatorAlert): Promise<void> {
+  const summary =
+    `[Sealfleet AWS Marketplace] ${alert.event} — ` +
+    `org=${alert.org ?? "?"} email=${alert.email ?? "?"} ` +
+    `customer=${alert.customerIdentifier} aws_account=${alert.awsAccountId ?? "?"}` +
+    (alert.note ? ` — ${alert.note}` : "");
+  // Always log so it lands in the portal's logs even without a webhook.
+  console.log(summary);
+  const url = process.env.MARKETPLACE_ALERT_WEBHOOK;
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: summary, ...alert }),
+    });
+  } catch (err) {
+    console.warn("notifyOperator webhook failed:", err);
+  }
 }
 
 // --- SNS message verification (public endpoint) ----------------------------
@@ -113,18 +207,47 @@ const SIGN_FIELDS: Record<string, string[]> = {
   UnsubscribeConfirmation: ["Message", "MessageId", "SubscribeURL", "Timestamp", "Token", "TopicArn", "Type"],
 };
 
-function validCertUrl(url: string): boolean {
+type SupportedAwsPartition = "aws" | "aws-us-gov" | "aws-cn";
+
+function snsDomainForPartition(partition: SupportedAwsPartition): string {
+  return partition === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com";
+}
+
+function snsHostForTopic(topicArn: string): string | null {
+  const parts = topicArn.split(":");
+  const partition = parts[1] as SupportedAwsPartition | undefined;
+  const service = parts[2];
+  const region = parts[3];
+  if (parts[0] !== "arn" || service !== "sns" || !region) return null;
+  if (partition !== "aws" && partition !== "aws-us-gov" && partition !== "aws-cn") return null;
+  return `sns.${region}.${snsDomainForPartition(partition)}`;
+}
+
+function isExpectedSnsUrl(url: string, topicArn: string): URL | null {
   try {
     const u = new URL(url);
-    return u.protocol === "https:" && /(^|\.)amazonaws\.com$/.test(u.hostname) && /sns/i.test(u.hostname);
+    const expectedHost = snsHostForTopic(topicArn);
+    if (!expectedHost) return null;
+    if (u.protocol !== "https:" || u.username || u.password || u.port) return null;
+    return u.hostname.toLowerCase() === expectedHost ? u : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function validCertUrl(url: string, topicArn: string): boolean {
+  const u = isExpectedSnsUrl(url, topicArn);
+  return Boolean(u && /^\/SimpleNotificationService-[A-Za-z0-9]+\.pem$/.test(u.pathname));
+}
+
+function validSubscribeUrl(url: string, topicArn: string): boolean {
+  const u = isExpectedSnsUrl(url, topicArn);
+  return Boolean(u && u.pathname === "/" && u.searchParams.get("Action") === "ConfirmSubscription");
 }
 
 export async function verifySnsSignature(msg: SnsMessage): Promise<boolean> {
   const fields = SIGN_FIELDS[msg.Type];
-  if (!fields || !validCertUrl(msg.SigningCertURL)) return false;
+  if (!fields || !validCertUrl(msg.SigningCertURL, msg.TopicArn)) return false;
   // Canonical string: "key\nvalue\n" for each present field, in the fixed order.
   let canonical = "";
   for (const f of fields) {
@@ -147,7 +270,7 @@ export async function verifySnsSignature(msg: SnsMessage): Promise<boolean> {
 
 // SubscriptionConfirmation: visit SubscribeURL to confirm the endpoint.
 export async function confirmSnsSubscription(msg: SnsMessage): Promise<void> {
-  if (msg.SubscribeURL && validCertUrl(msg.SigningCertURL)) {
+  if (msg.SubscribeURL && validCertUrl(msg.SigningCertURL, msg.TopicArn) && validSubscribeUrl(msg.SubscribeURL, msg.TopicArn)) {
     try { await fetch(msg.SubscribeURL); } catch { /* SNS retries */ }
   }
 }

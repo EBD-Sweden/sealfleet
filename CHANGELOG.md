@@ -6,6 +6,89 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.6] — Hide platform-only admin surfaces from customers
+
+### Fixed
+- The **Tenants** admin tab is no longer shown to customers. Every self-serve
+  signup receives a tenant-scoped `admin` role, so `is_admin` was true for
+  everyone and the nav offered a page whose API (`requirePlatformAdmin`) could
+  only ever return 403. Sessions now carry a distinct `is_platform_admin`,
+  derived once in the `jwt` callback where every provider converges, and it
+  gates both the nav item and the page (`AdminGuard platformOnly`). Roles and
+  Users remain available — an org owner manages their own members, whether
+  invited directly or provisioned over SSO/SCIM.
+
+## [0.7.5] — Clean image builds
+
+### Fixed
+- Hosted portal images are now built from **committed source only**. Locally
+  built images 0.7.0–0.7.4 included files that are untracked in this repo,
+  because Docker's build context is the directory rather than git, which put
+  internal-only pages and API routes into a published image. CI-built images
+  were never affected. `scripts/build-hosted-images.sh` uses `git archive`, so
+  the build context is an allowlist and uncommitted content cannot ship.
+
+## [0.7.4] — Base-image hardening + image scanning in CI
+
+### Security
+- Portal base image `node:20-alpine` → `node:22-alpine`. Node 20 is in
+  maintenance and its image (last rebuilt 2026-04-15) still carried 18 fixable
+  HIGH/CRITICAL findings, including the Alpine `libssl3`/`libcrypto3`
+  CVE-2026-45447.
+- Dropped npm from the portal runner stage. The entrypoint is `node server.js`,
+  so npm is never invoked at runtime, yet its bundled dependencies (`tar`
+  — including CRITICAL CVE-2026-59873 — `sigstore`, `brace-expansion`,
+  `picomatch`) were the image's only remaining CVE source. The portal image now
+  reports **0** fixable HIGH/CRITICAL vulnerabilities, down from 18.
+- Deploy image installs only the pinned, checksum-verified docker **client**
+  binary instead of piping `get.docker.com` into a shell, which installed the
+  whole engine. `server.py` shells out to `docker build`/`docker push` as a
+  client against an external daemon, so `dockerd`/`containerd`/`runc` were never
+  executed there but did contribute their embedded Go CVEs (containerd
+  CVE-2026-53488/53489, grpc GHSA-hrxh-6v49-42gf). Found by the new image scan.
+
+### Added
+- Image vulnerability scanning in the supply-chain workflow, blocking on
+  CRITICAL/HIGH, for all five service images and on pull requests. The security
+  workflow's trivy run is filesystem-scoped, so base-image vulnerabilities were
+  previously invisible to CI: it stayed green while the published image carried
+  a CRITICAL.
+
+## [0.7.3] — Portal dependency CVE fixes
+
+### Security
+- Resolved three HIGH advisories in portal dependencies: `postcss` 8.4.31 →
+  8.5.24 (GHSA-r28c-9q8g-f849 path traversal via `sourceMappingURL`
+  auto-loading, CVE-2026-45623) and `sharp` 0.34.5 → 0.35.3 (inherited libvips
+  CVE-2026-33327/33328/35590/35591). Next 16.2.11 → 16.2.12 alone does not fix
+  either — it still pins `postcss` to exactly 8.4.31 and caps `sharp` at
+  `^0.34.5` — so `overrides` force the patched transitive versions.
+
+## [0.7.2] — Public pricing page
+
+### Added
+- **Public `/pricing` page**: plans are visible without an account, so prospects
+  can compare before signing up. Amounts are read live from Stripe server-side
+  (`planDisplays()` in `portal/src/lib/stripe.ts`) with a 10-minute in-memory
+  cache, and fall back to plan blurbs if Stripe is unreachable. `/pricing` is
+  whitelisted in the portal route policy; checkout still requires an account, so
+  every CTA routes to `/signup`.
+
+### Fixed
+- The pricing page is rendered per request (`dynamic = "force-dynamic"`). A
+  static build-time prerender saw no Stripe configuration and baked an empty
+  "plans being finalized" state into the image.
+
+## [0.7.0] — AWS Marketplace self-host license fulfillment
+
+### Changed
+- **AWS Marketplace self-host license flow**: fulfillment now records buyer
+  contact details, confirms entitlement, and alerts the operator to issue/revoke
+  an offline-signed license key instead of creating a hosted tenant or toggling
+  tenant API keys. Migration `017_aws_marketplace_selfhost.sql`; optional AWS
+  App Runner Terraform lives under `deploy/terraform/hosted-aws/` only for the
+  "Deployed on AWS" badge path.
+
 ## [0.6.0] — AWS Marketplace SaaS fulfillment
 
 ### Added

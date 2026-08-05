@@ -3,7 +3,16 @@
 import { useSession } from "next-auth/react";
 import { ShieldAlert } from "lucide-react";
 
-export function AdminGuard({ children }: { children: React.ReactNode }) {
+// `platformOnly` marks a page that belongs to the platform operator rather than
+// to a customer org. Every self-serve signup is an admin of its own tenant, so
+// is_admin alone would admit them to platform surfaces they cannot use.
+export function AdminGuard({
+  children,
+  platformOnly = false,
+}: {
+  children: React.ReactNode;
+  platformOnly?: boolean;
+}) {
   const { data: session, status } = useSession();
 
   if (status === "loading") {
@@ -14,7 +23,11 @@ export function AdminGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!session?.user?.is_admin) {
+  const permitted = platformOnly
+    ? session?.user?.is_platform_admin === true
+    : session?.user?.is_admin === true;
+
+  if (!permitted) {
     return (
       <div className="flex flex-col items-center justify-center p-12 gap-4">
         <ShieldAlert className="h-12 w-12 text-destructive" />

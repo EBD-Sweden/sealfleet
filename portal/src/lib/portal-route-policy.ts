@@ -2,6 +2,8 @@ const PUBLIC_EXACT_PATHS = new Set([
   "/",
   "/login",
   "/signup",
+  // Public pricing so prospects can see plans before creating an account.
+  "/pricing",
   "/favicon.ico",
   "/api/health",
   "/api/ready",

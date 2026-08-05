@@ -77,6 +77,67 @@ export function planByKey(key: string): Plan | undefined {
   return availablePlans().find((p) => p.key === key);
 }
 
+export interface PlanDisplay extends Plan {
+  amountLabel: string;   // "€3,990", "Usage-based", or "" if Stripe lookup failed
+  intervalLabel: string; // "per month" | "per year" | "per 1M API calls" | ""
+}
+
+async function stripeGet<T = Record<string, unknown>>(path: string): Promise<T> {
+  const res = await fetch(`${STRIPE_API}${path}`, {
+    headers: { Authorization: `Bearer ${secretKey()}` },
+  });
+  const json = (await res.json()) as { error?: { message?: string } };
+  if (!res.ok) throw new Error(`Stripe ${path}: ${json?.error?.message ?? res.status}`);
+  return json as T;
+}
+
+// Short in-memory cache so the public pricing page doesn't hit Stripe on every
+// anonymous request. Persists within a warm server instance; a cold start just
+// re-fetches. 10-minute TTL.
+let _planCache: { at: number; data: PlanDisplay[] } | null = null;
+const PLAN_TTL_MS = 10 * 60 * 1000;
+
+// Resolve display pricing for the public pricing page. Reads live amounts from
+// Stripe so the page never drifts from the catalog. Never throws: on any failure
+// a plan falls back to an empty amount and the blurb carries the meaning.
+export async function planDisplays(): Promise<PlanDisplay[]> {
+  if (_planCache && Date.now() - _planCache.at < PLAN_TTL_MS) return _planCache.data;
+  const symbolFor = (cur: string) =>
+    ({ EUR: "€", USD: "$", GBP: "£" }[cur.toUpperCase()] ?? `${cur.toUpperCase()} `);
+  const out: PlanDisplay[] = [];
+  for (const p of availablePlans()) {
+    let amountLabel = "", intervalLabel = "";
+    try {
+      const price = await stripeGet<{
+        currency?: string; unit_amount?: number | null; unit_amount_decimal?: string | null;
+        recurring?: { interval?: string; usage_type?: string };
+        tiers?: Array<{ unit_amount_decimal?: string | null }>;
+      }>(`/prices/${p.priceId}?expand[]=tiers`);
+      const sym = symbolFor(price.currency ?? "eur");
+      const fmt = (n: number, max = 0) => `${sym}${n.toLocaleString("en-US", { maximumFractionDigits: max })}`;
+      if (!p.metered && price.unit_amount != null) {
+        amountLabel = fmt(price.unit_amount / 100);
+        intervalLabel = price.recurring?.interval === "year" ? "per year" : "per month";
+      } else {
+        // Metered/usage: derive a per-1M-calls figure from per-unit pricing.
+        const decimal = price.unit_amount_decimal ?? price.tiers?.[0]?.unit_amount_decimal ?? null;
+        if (decimal != null) {
+          amountLabel = fmt((Number(decimal) / 100) * 1_000_000, 2);
+          intervalLabel = "per 1M API calls";
+        } else {
+          amountLabel = "Usage-based";
+          intervalLabel = "pay per API call";
+        }
+      }
+    } catch {
+      /* leave amount empty; the blurb still conveys the plan */
+    }
+    out.push({ ...p, amountLabel, intervalLabel });
+  }
+  _planCache = { at: Date.now(), data: out };
+  return out;
+}
+
 // Report usage to a Stripe Billing Meter. `value` is the number of API calls in
 // the window; `identifier` dedupes retries. Used by the report-usage job.
 export async function reportMeterEvent(

@@ -115,9 +115,12 @@ the account-level part:
 
 ## 5. AWS Marketplace seller registration
 
-This is the second paid channel (self-hosted BYOF customers who buy through AWS get
-an entitlement instead of a license key). Registration is **manual, one-time**, and
-takes a few days for AWS to approve tax/banking.
+This is the second paid channel: AWS Marketplace sells the self-host license, and
+buyers run Sealfleet in their own infra with BYOF Terraform. The fulfillment
+handler now lives at `/api/aws-marketplace`: it resolves the buyer, records their
+contact details, confirms entitlement via GetEntitlements/SNS, and alerts the
+operator to issue the signed license key offline. Registration is **manual,
+one-time**, and takes a few days for AWS to approve tax/banking.
 
 **Steps:**
 1. Go to the **AWS Marketplace Management Portal**:
@@ -128,18 +131,19 @@ takes a few days for AWS to approve tax/banking.
    information. AWS reviews this — allow 3–5 business days. You can't publish a paid
    product until it clears.
 3. **Choose product type: "SaaS"** (not AMI/container) — Sealfleet is delivered as
-   software the customer runs (BYOF) or as your hosted service; the SaaS model with
-   **metered/contract pricing** matches the license model. This gives you the
-   **AWS License Manager / Marketplace Metering + Entitlement API** that
-   `runtime/licensing.py` already reads (`aws_marketplace_product_code`).
+   a self-host license, and the SaaS model with **contract pricing** matches the
+   license/entitlement workflow. This gives you Marketplace Metering
+   `ResolveCustomer` plus the Entitlement API that the portal fulfillment routes
+   use (`SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE`).
 4. **Create the product** (SaaS Subscription or SaaS Contract). You'll get a
    **Product Code** — put it in the Helm value `licensing.awsMarketplaceProductCode`
    / env `SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE` so entitlement checks resolve.
-5. **Fulfillment URL:** AWS redirects buyers to a landing page you host (e.g.
-   `https://sealfleet.example.com/aws-marketplace`) with a `x-amzn-marketplace-token`;
-   you call `ResolveCustomer` → `GetEntitlements` to activate. (This landing handler
-   is a **later** build — flag it when you're ready; the entitlement *read* side in
-   `licensing.py` is done.)
+5. **Fulfillment URL:** point the Marketplace product to
+   `https://<portal>/api/aws-marketplace`. AWS POSTs `x-amzn-marketplace-token`;
+   the route calls `ResolveCustomer`, stores a signed short-lived cookie, and
+   redirects the buyer to `/aws-marketplace` to leave contact details. Configure
+   the product's SNS subscription lifecycle topic to
+   `https://<portal>/api/aws-marketplace/notification`.
 6. Submit for **listing review**. AWS reviews the listing before it goes public.
 
 **Programmatic upkeep (after the manual launch):** once the product exists, use the
@@ -148,7 +152,7 @@ pricing/versions from CI — no console clicking for routine changes. Initial cr
 must be done in the console.
 
 > You said you'll do the seller registration — steps 1–2 are all you. Ping me for
-> steps 3–6 (product config + the fulfillment landing handler) when the account clears.
+> steps 3–6 (product config + final fulfillment URL/SNS wiring) when the account clears.
 
 ---
 
@@ -162,4 +166,4 @@ must be done in the console.
 | Stripe product + keys | Stripe connected; product to create | you (`docs/BILLING.md`) |
 | Stripe webhook wiring (code) | see `docs/BILLING.md` | built in repo |
 | AWS Marketplace seller reg | to do (3–5 day approval) | you (steps 1–2) |
-| AWS product + fulfillment handler | later | me, when account clears |
+| AWS product + fulfillment handler | built; wiring needs product code + URLs | me/operator, when account clears |

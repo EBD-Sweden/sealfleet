@@ -19,7 +19,7 @@
 - `runtime/cli.py` — `python -m runtime.cli` agent/operator CLI (status, invoke, pipelines, workflows, deploy, registry) ✅
 - `runtime/credentials.py` — Credential resolution (BYOK / platform Fernet / k8s Secret modes) ✅
 - `runtime/policy_hooks.py` — Policy enforcement hooks ✅
-- `runtime/manifests/`, `runtime/pipelines/`, `runtime/types.yaml`, `runtime/channels.yaml` — Typed manifests, named/v2 pipelines, channel/type definitions ✅
+- `runtime/manifests/`, `runtime/pipelines/`, `runtime/types.yaml`, `runtime/channels.yaml` — Typed manifests, source-controlled named/v2 pipelines, channel/type definitions; startup-generated pipeline docs live under ignored `runtime/.generated/pipelines/` ✅
 
 **Key interfaces:**
 - `POST /call` — Invoke an MCP tool through the router
@@ -54,6 +54,7 @@
 **Modules:**
 - `portal/src/components/SecureInputModal.tsx` — Sealed input field with handle generation ✅
 - Test console, catalog, docs, and deploy UI pages under `portal/src/app/` ✅
+- `portal/src/lib/aws-marketplace.ts` + `portal/src/app/api/aws-marketplace/*` — AWS Marketplace self-host license fulfillment: ResolveCustomer, Concurrent Agreements LicenseArn subscription identity, contact capture, entitlement/SNS lifecycle tracking, and operator license-issue/revoke alerts; no raw license private key on server ✅
 
 ---
 

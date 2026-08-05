@@ -141,27 +141,68 @@ session), so schedule it however you like:
 
 Tune the rate on the meter's price (`sealfleet_hosted_usage`, €49/1M by default).
 
-## AWS Marketplace (SaaS fulfillment)
+## AWS Marketplace (self-host license)
 
-A second paid channel: customers subscribe on AWS Marketplace and pay on their AWS
-bill. Flow (mirrors the Stripe access model):
+The AWS Marketplace channel sells a **self-host license**: the customer runs
+Sealfleet in **their own** infra (BYOF Terraform) and unlocks Enterprise features
+with a signed license token. We run **nothing** for them on AWS — so it costs us
+~$0 until a deal closes (and even then it's in the buyer's account). This is
+distinct from the hosted GCP Cloud Run SaaS (which is the "try and use" cloud
+version). The license token is signed **offline** with the operator-held private
+key, which never touches a server.
+
+For SaaS products created since 2026-06-01, AWS Marketplace Concurrent
+Agreements no longer returns the legacy `CustomerIdentifier` from
+`ResolveCustomer`; the portal treats `LicenseArn` as the durable subscription
+identity and filters `GetEntitlements` by `LICENSE_ARN` for those agreements.
+Migration `018_aws_marketplace_concurrent_agreements.sql` records the LicenseArn
+and CustomerAWSAccountId alongside the existing operator queue row.
+
+Operator flow:
 
 1. After subscribing, AWS POSTs the buyer to **`/api/aws-marketplace`** with
    `x-amzn-marketplace-token`. We call **ResolveCustomer**, stash a signed cookie,
-   and redirect to **`/aws-marketplace`** to register.
-2. Registration (**`/api/aws-marketplace/register`**) creates the tenant, links the
-   AWS `CustomerIdentifier`, and checks **GetEntitlements**.
-3. **`/api/aws-marketplace/notification`** (SNS, signature-verified) flips the
-   tenant's API keys active/inactive on `subscribe-success` / `unsubscribe-*`.
+   and redirect to **`/aws-marketplace`**.
+2. The buyer submits **contact details** (org + email — no account, no password).
+   **`/api/aws-marketplace/register`** records them, checks **GetEntitlements**,
+   and **notifies the operator** that a license must be issued. No hosted tenant is
+   created.
+3. **`/api/aws-marketplace/notification`** (SNS, signature-verified) tracks the
+   subscription lifecycle and alerts the operator on `subscribe-success` (issue the
+   license) and `unsubscribe-success` (revoke / do not renew). `unsubscribe-pending`
+   just sets a grace status.
 
-Schema: `db/migrations/016_aws_marketplace.sql` (`aws_marketplace_customers`).
-Code: `portal/src/lib/aws-marketplace.ts` + the routes above. Uses the AWS SDK
+**Operator runbook (per subscription):**
+
+```
+# 1. An alert arrives (log line, or MARKETPLACE_ALERT_WEBHOOK) once the entitlement
+#    is confirmed. Find the queue:
+psql "$DATABASE_URL" -c \
+  "SELECT customer_identifier, org_name, contact_email, status
+     FROM aws_marketplace_customers WHERE license_issued = false AND status = 'active';"
+
+# 2. Issue the token OFFLINE with the private key (see LICENSING.md):
+python scripts/sealfleet-license.py issue --private <path/to/private.key> \
+  --customer "<org_name> — AWS Marketplace" --days 365
+
+# 3. Email the token + the self-host setup guide to contact_email, then close it out:
+psql "$DATABASE_URL" -c \
+  "UPDATE aws_marketplace_customers
+      SET license_issued = true, license_issued_at = NOW()
+    WHERE customer_identifier = '<customer_identifier>';"
+```
+
+Schema: `db/migrations/016_aws_marketplace.sql` + `017_aws_marketplace_selfhost.sql`
+(`aws_marketplace_customers` — the operator's work queue). Code:
+`portal/src/lib/aws-marketplace.ts` + the routes above. Uses the AWS SDK
 (`@aws-sdk/client-marketplace-metering`, `-entitlement-service`).
 
-**Config (portal env):** `SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE`,
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (IAM user scoped to
-`aws-marketplace:ResolveCustomer` + `GetEntitlements`), `AWS_MARKETPLACE_REGION`
-(us-east-1). Hosted Terraform: `aws_marketplace_product_code`,
-`aws_access_key_id`/`aws_secret_access_key` (→ Secret Manager). Point the AWS
-Marketplace product's **fulfillment URL** at `https://<portal>/api/aws-marketplace`
-and its **SNS topic** at `https://<portal>/api/aws-marketplace/notification`.
+**Config (portal env):** `SEALFLEET_AWS_MARKETPLACE_PRODUCT_CODE`, AWS creds
+(either `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` for an IAM user scoped to
+`aws-marketplace:ResolveCustomer` + `GetEntitlements`, **or** an App Runner /
+instance role with `AWS_ROLE_ARN` set), `AWS_MARKETPLACE_REGION` (us-east-1), and
+optional `MARKETPLACE_ALERT_WEBHOOK` (Slack/generic webhook for issue/revoke
+alerts). Point the AWS Marketplace product's **fulfillment URL** at
+`https://<portal>/api/aws-marketplace` and its **SNS topic** at
+`https://<portal>/api/aws-marketplace/notification`. Because fulfillment is served
+by the already-live GCP portal, **no always-on AWS resource is required**.

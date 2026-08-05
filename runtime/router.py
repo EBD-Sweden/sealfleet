@@ -449,7 +449,10 @@ def generate_pipeline_yaml(output_type: str, chain: list[dict],
 
 def write_pipeline_docs(type_graph: TypeGraph, types_reg: dict):
     """Generate PIPELINE.md and pipeline.yaml for all resolvable output types."""
-    pipelines_dir = Path(__file__).parent / "pipelines"
+    # Generated docs are runtime artifacts, not source pipeline definitions.
+    # Keep them under the repo-ignored scratch tree so local OSS startup does
+    # not dirty runtime/pipelines/ in a fresh clone.
+    pipelines_dir = Path(__file__).parent / ".generated" / "pipelines"
     count = 0
     for type_name in type_graph.producers:
         type_def = types_reg.get(type_name, {})

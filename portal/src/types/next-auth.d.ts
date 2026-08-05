@@ -8,6 +8,10 @@ declare module "next-auth" {
       name?: string | null;
       tenant_id: string;
       is_admin: boolean;
+      // Platform operator, not merely an admin of their own tenant. Every
+      // self-serve signup is a tenant admin, so is_admin cannot gate
+      // platform-only surfaces such as the tenant list.
+      is_platform_admin: boolean;
       image?: string | null;
       groups?: string[];
     };
@@ -26,6 +30,7 @@ declare module "@auth/core/jwt" {
     user_id: string;
     tenant_id: string;
     is_admin: boolean;
+    is_platform_admin: boolean;
     email: string;
     groups?: string[];
   }

@@ -1,23 +1,39 @@
-// Completes AWS Marketplace registration: reads the signed cookie from the
-// fulfillment step, creates a Sealfleet tenant, links it to the AWS customer, and
-// activates it if AWS reports an active entitlement. Public (authenticated by the
-// signed cookie, not a session).
+// Completes AWS Marketplace self-host registration: reads the signed cookie from
+// the fulfillment step, records the buyer's contact details, and notifies the
+// operator to issue a self-host license token (issued OFFLINE with the operator's
+// private key — never on this server). No hosted tenant is created. Public
+// (authenticated by the signed cookie, not a session).
 
 import { NextRequest, NextResponse } from "next/server";
 import { jwtVerify } from "jose";
-import { createTenantWithAdmin, SignupError } from "@/lib/provisioning";
-import { getAwsCustomer, linkCustomerToTenant, hasActiveEntitlement } from "@/lib/aws-marketplace";
-import { setTenantKeysActive } from "@/lib/billing";
+import {
+  getAwsCustomer,
+  registerSelfHostContact,
+  hasActiveEntitlement,
+  setAwsStatus,
+  notifyOperator,
+  markOperatorNotified,
+} from "@/lib/aws-marketplace";
 
 export const runtime = "nodejs";
+
+function isEmail(s: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
+}
 
 export async function POST(req: NextRequest) {
   const cookie = req.cookies.get("aws_mp")?.value;
   if (!cookie) return NextResponse.json({ error: "No marketplace session; start from AWS Marketplace" }, { status: 400 });
 
+  const jwtSecret = process.env.NEXTAUTH_SECRET;
+  if (!jwtSecret) {
+    console.error("AWS Marketplace session verification requires NEXTAUTH_SECRET");
+    return NextResponse.json({ error: "AWS Marketplace is misconfigured" }, { status: 500 });
+  }
+
   let cid: string;
   try {
-    const secret = new TextEncoder().encode(process.env.NEXTAUTH_SECRET || "dev-secret");
+    const secret = new TextEncoder().encode(jwtSecret);
     const { payload } = await jwtVerify(cookie, secret);
     cid = String(payload.cid);
   } catch {
@@ -26,34 +42,42 @@ export async function POST(req: NextRequest) {
 
   const existing = await getAwsCustomer(cid);
   if (!existing) return NextResponse.json({ error: "Unknown marketplace customer" }, { status: 400 });
-  if (existing.tenant_id) return NextResponse.json({ error: "This subscription is already linked to an account" }, { status: 409 });
+  if (existing.license_issued) {
+    return NextResponse.json({ error: "A license has already been issued for this subscription. Check your email or contact support." }, { status: 409 });
+  }
 
   const body = await req.json().catch(() => ({}));
+  const org = String(body.org ?? "").trim();
+  const email = String(body.email ?? "").trim();
+  const name = String(body.name ?? "").trim();
+  if (!org) return NextResponse.json({ error: "Organization name is required" }, { status: 400 });
+  if (!isEmail(email)) return NextResponse.json({ error: "A valid work email is required" }, { status: 400 });
+
   try {
-    const result = await createTenantWithAdmin({
-      org: body.org ?? "",
-      email: body.email ?? "",
-      password: body.password ?? "",
-    });
+    await registerSelfHostContact(cid, { org, email, name });
+    // Confirm the entitlement now if AWS already reports it; otherwise the
+    // subscribe-success SNS notification will confirm it shortly.
     const entitled = await hasActiveEntitlement(cid).catch(() => false);
-    await linkCustomerToTenant(cid, result.tenantId, entitled ? "active" : "pending");
-    // Keys are active from provisioning; if AWS hasn't confirmed the entitlement
-    // yet, hold access until the subscribe-success notification arrives.
-    if (!entitled) await setTenantKeysActive(result.tenantId, false);
+    if (entitled) await setAwsStatus(cid, "active");
+    await notifyOperator({
+      event: "license-requested",
+      customerIdentifier: cid,
+      awsAccountId: existing.aws_account_id,
+      org,
+      email,
+      note: entitled ? "entitlement confirmed — ready to issue license" : "awaiting subscribe-success confirmation",
+    });
+    await markOperatorNotified(cid);
 
     const res = NextResponse.json({
       ok: true,
-      tenant_slug: result.tenantSlug,
-      api_key: result.apiKey,
-      entitled,
-      message: entitled
-        ? "Account created and activated. Save your API key (shown once)."
-        : "Account created. Access activates once AWS confirms your subscription (usually within a minute).",
+      message:
+        "Thanks — your self-host license is being prepared. We'll email your signed license key and the self-host setup guide to " +
+        email + " shortly. It unlocks Enterprise features in your own Sealfleet deployment.",
     }, { status: 201 });
     res.cookies.delete("aws_mp");
     return res;
   } catch (err) {
-    if (err instanceof SignupError) return NextResponse.json({ error: err.message }, { status: err.status });
     console.error("aws-marketplace register failed:", err);
     return NextResponse.json({ error: "Registration failed" }, { status: 500 });
   }

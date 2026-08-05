@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Search } from "lucide-react";
 import { UserMenu } from "@/components/user-menu";
 
-const PUBLIC_PATHS = ["/login", "/signup", "/aws-marketplace"];
+const PUBLIC_PATHS = ["/login", "/signup", "/pricing", "/aws-marketplace"];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();

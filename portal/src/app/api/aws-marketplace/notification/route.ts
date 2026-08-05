@@ -1,16 +1,19 @@
 // AWS Marketplace subscription notifications (delivered via SNS). Public path,
-// authenticated by SNS signature verification. Flips the tenant's API keys
-// active/inactive as the subscription changes (same enforcement as Stripe billing).
+// authenticated by SNS signature verification. In the self-host license model we
+// track the subscription's lifecycle and alert the operator when a license should
+// be issued (subscribe-success) or revoked / not renewed (unsubscribe). No hosted
+// tenant keys are flipped — the customer runs Sealfleet in their own infra.
 
 import { NextRequest, NextResponse } from "next/server";
 import {
   verifySnsSignature,
   confirmSnsSubscription,
   setAwsStatus,
+  getAwsCustomer,
+  notifyOperator,
   type SnsMessage,
   type AwsStatus,
 } from "@/lib/aws-marketplace";
-import { setTenantKeysActive } from "@/lib/billing";
 
 export const runtime = "nodejs";
 
@@ -44,17 +47,33 @@ export async function POST(req: NextRequest) {
     const cid = evt["customer-identifier"];
     const action = evt.action;
     if (cid && action) {
-      // Map the AWS action to our status + key activation.
-      const map: Record<string, { status: AwsStatus; keysActive: boolean } | undefined> = {
-        "subscribe-success": { status: "active", keysActive: true },
-        "subscribe-fail": { status: "unsubscribed", keysActive: false },
-        "unsubscribe-pending": { status: "unsubscribe_pending", keysActive: true },
-        "unsubscribe-success": { status: "unsubscribed", keysActive: false },
+      const map: Record<string, AwsStatus | undefined> = {
+        "subscribe-success": "active",
+        "subscribe-fail": "unsubscribed",
+        "unsubscribe-pending": "unsubscribe_pending",
+        "unsubscribe-success": "unsubscribed",
       };
-      const m = map[action];
-      if (m) {
-        const tenantId = await setAwsStatus(cid, m.status);
-        if (tenantId) await setTenantKeysActive(tenantId, m.keysActive);
+      const status = map[action];
+      if (status) {
+        await setAwsStatus(cid, status);
+        // Alert the operator on the lifecycle events that need a human action:
+        // issue a license (entitlement now confirmed) or revoke/stop renewal.
+        if (action === "subscribe-success" || action === "unsubscribe-success") {
+          const row = await getAwsCustomer(cid).catch(() => null);
+          await notifyOperator({
+            event: action === "subscribe-success" ? "entitlement-confirmed" : "unsubscribe",
+            customerIdentifier: cid,
+            awsAccountId: row?.aws_account_id,
+            org: row?.org_name,
+            email: row?.contact_email,
+            note:
+              action === "subscribe-success"
+                ? row?.license_issued
+                  ? "renewal confirmed — license already issued"
+                  : "entitlement confirmed — issue the self-host license"
+                : "subscription ended — revoke / do not renew the license",
+          });
+        }
       }
     }
   }

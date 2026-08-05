@@ -6,13 +6,15 @@ const {
   verifySnsSignatureMock,
   confirmSnsSubscriptionMock,
   setAwsStatusMock,
-  setTenantKeysActiveMock,
+  getAwsCustomerMock,
+  notifyOperatorMock,
 } = vi.hoisted(() => ({
   jsonMock: vi.fn((body: unknown, init?: ResponseInit) => ({ body, status: init?.status ?? 200 })),
   verifySnsSignatureMock: vi.fn(),
   confirmSnsSubscriptionMock: vi.fn(),
   setAwsStatusMock: vi.fn(),
-  setTenantKeysActiveMock: vi.fn(),
+  getAwsCustomerMock: vi.fn(),
+  notifyOperatorMock: vi.fn(),
 }));
 
 vi.mock("next/server", () => ({ NextResponse: { json: jsonMock } }));
@@ -20,8 +22,9 @@ vi.mock("@/lib/aws-marketplace", () => ({
   verifySnsSignature: verifySnsSignatureMock,
   confirmSnsSubscription: confirmSnsSubscriptionMock,
   setAwsStatus: setAwsStatusMock,
+  getAwsCustomer: getAwsCustomerMock,
+  notifyOperator: notifyOperatorMock,
 }));
-vi.mock("@/lib/billing", () => ({ setTenantKeysActive: setTenantKeysActiveMock }));
 
 import { POST } from "@/app/api/aws-marketplace/notification/route";
 
@@ -35,15 +38,23 @@ function notif(action: string, cid = "cust-1") {
 beforeEach(() => {
   vi.clearAllMocks();
   verifySnsSignatureMock.mockResolvedValue(true);
-  setAwsStatusMock.mockResolvedValue("tenant-1");
+  setAwsStatusMock.mockResolvedValue(undefined);
+  getAwsCustomerMock.mockResolvedValue({
+    customer_identifier: "cust-1",
+    aws_account_id: "1234",
+    org_name: "Acme",
+    contact_email: "ops@acme.com",
+    license_issued: false,
+  });
 });
 
-describe("aws-marketplace notification route", () => {
+describe("aws-marketplace notification route (self-host license)", () => {
   it("rejects an invalid SNS signature (403)", async () => {
     verifySnsSignatureMock.mockResolvedValue(false);
     const res = await POST(req(notif("subscribe-success")));
     expect(res.status).toBe(403);
-    expect(setTenantKeysActiveMock).not.toHaveBeenCalled();
+    expect(setAwsStatusMock).not.toHaveBeenCalled();
+    expect(notifyOperatorMock).not.toHaveBeenCalled();
   });
 
   it("confirms an SNS subscription", async () => {
@@ -52,25 +63,31 @@ describe("aws-marketplace notification route", () => {
     expect(res.status).toBe(200);
   });
 
-  it("subscribe-success activates the tenant's keys", async () => {
+  it("subscribe-success marks active and asks the operator to issue a license", async () => {
     await POST(req(notif("subscribe-success")));
     expect(setAwsStatusMock).toHaveBeenCalledWith("cust-1", "active");
-    expect(setTenantKeysActiveMock).toHaveBeenCalledWith("tenant-1", true);
+    expect(notifyOperatorMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "entitlement-confirmed", customerIdentifier: "cust-1" }),
+    );
   });
 
-  it("unsubscribe-success deactivates the tenant's keys", async () => {
+  it("unsubscribe-success marks unsubscribed and asks the operator to revoke", async () => {
     await POST(req(notif("unsubscribe-success")));
     expect(setAwsStatusMock).toHaveBeenCalledWith("cust-1", "unsubscribed");
-    expect(setTenantKeysActiveMock).toHaveBeenCalledWith("tenant-1", false);
+    expect(notifyOperatorMock).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "unsubscribe", customerIdentifier: "cust-1" }),
+    );
   });
 
-  it("unsubscribe-pending keeps access during the grace window", async () => {
+  it("unsubscribe-pending sets the grace status without alerting the operator", async () => {
     await POST(req(notif("unsubscribe-pending")));
-    expect(setTenantKeysActiveMock).toHaveBeenCalledWith("tenant-1", true);
+    expect(setAwsStatusMock).toHaveBeenCalledWith("cust-1", "unsubscribe_pending");
+    expect(notifyOperatorMock).not.toHaveBeenCalled();
   });
 
-  it("ignores unknown actions without touching keys", async () => {
+  it("ignores unknown actions", async () => {
     await POST(req(notif("something-else")));
-    expect(setTenantKeysActiveMock).not.toHaveBeenCalled();
+    expect(setAwsStatusMock).not.toHaveBeenCalled();
+    expect(notifyOperatorMock).not.toHaveBeenCalled();
   });
 });

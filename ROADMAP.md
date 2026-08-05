@@ -28,7 +28,7 @@ Channel-based message routing between MCP tools with policy enforcement.
 - **`POST /resolve`** — the LLM-facing endpoint: give it an output type + raw inputs, it resolves and executes the full tool chain
 - **`GET /capabilities`** — LLM discovery: returns all producible types with their resolved chains and required inputs
 - **`POST /manifests/typed`** — register typed manifests with input/output type declarations; validates against type registry on registration
-- **Auto-generated PIPELINE.md docs** — each resolvable output type gets `runtime/pipelines/<Type>/PIPELINE.md` (human-readable) + `pipeline.yaml` (machine-readable), regenerated on startup
+- **Auto-generated PIPELINE.md docs** — each resolvable output type gets ignored runtime artifacts under `runtime/.generated/pipelines/<Type>/PIPELINE.md` (human-readable) + `pipeline.yaml` (machine-readable), regenerated on startup without dirtying source clones
 - **Broken chains detected at manifest registration time**, not mid-execution
 
 ### Type 3: Auto-Wrap from API Schemas 🚧 (public-demo OpenAPI slice live; gRPC spike)

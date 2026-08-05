@@ -1,0 +1,28 @@
+# Copy this OUTSIDE the repo and fill in. Never commit real values.
+#   terraform apply -var-file=/abs/path/to/aws.tfvars
+
+region     = "us-east-1"
+name       = "sealfleet"
+image_tag  = "0.7.0"
+
+# SEPARATE Neon project from the GCP deployment (AWS Marketplace tenants live here).
+database_url = "postgresql://USER:PASSWORD@ep-xxxx-pooler.us-east-1.aws.neon.tech/sealfleet?sslmode=require"
+
+# Branded portal domain (optional). Empty = use the *.awsapprunner.com URL.
+portal_domain = "aws.sealfleet.ebdsweden.com"
+
+# Sealfleet Enterprise license token (issued with the private key). Empty = free tier.
+license_key = ""
+
+# AWS Marketplace SaaS ProductCode (turns on the fulfillment handler).
+aws_marketplace_product_code = "epm8d0cc37x2gjxfwead5pf48"
+
+# Stripe (optional — only if you also take direct card payments on the AWS instance).
+stripe_secret_key     = ""
+stripe_webhook_secret = ""
+
+# Scaling / size (defaults are fine to start).
+# min_size = 1
+# max_size = 5
+# cpu      = "512"
+# memory   = "1024"

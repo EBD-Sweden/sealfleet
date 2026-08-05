@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import router
 from router import TypeGraph
 
 
@@ -175,3 +176,20 @@ def test_type_graph_validate_manifests():
     issues = tg.validate_all_manifests({}, types_reg)
     assert any("UnknownOutput" in i for i in issues)
     assert any("UnknownInput" in i for i in issues)
+
+
+def test_write_pipeline_docs_uses_ignored_generated_artifact_dir(tmp_path, monkeypatch):
+    """Generated pipeline docs must not dirty runtime/pipelines in source clones."""
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    monkeypatch.setattr(router, "__file__", str(runtime_dir / "router.py"))
+
+    tg = TypeGraph()
+    types_reg = _types_registry()
+    tg.register_manifest(_weather_manifest())
+
+    router.write_pipeline_docs(tg, types_reg)
+
+    assert not (runtime_dir / "pipelines").exists()
+    assert (runtime_dir / ".generated" / "pipelines" / "WeatherData" / "PIPELINE.md").exists()
+    assert (runtime_dir / ".generated" / "pipelines" / "WeatherData" / "pipeline.yaml").exists()
