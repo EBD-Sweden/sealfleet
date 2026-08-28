@@ -118,6 +118,12 @@ LOCAL_LLM_MODEL=qwen2.5:14b \
 docker compose up -d
 ```
 
+For day-to-day use copy `.env.example` to `.env` — it sets
+`COMPOSE_PROFILES=local-llm` so a plain `docker compose up -d <service>` does not
+reconcile the model away, and holds `NGC_API_KEY`. **Memory note:** the 30B NIM
+needs ~60 GB of unified memory on a GB10; it cannot share the box with a
+fine-tuning job at the same time (it gets OOM-killed, exit 137).
+
 Then pin the chat to it:
 
 ```bash
@@ -141,6 +147,14 @@ operator key is deliberately denied `credential.*`, so the chat cannot reach a
 secret the user could not reach themselves, and audit records the real person.
 Known providers: openai, anthropic, groq, mistral, together, deepseek,
 openrouter, nvidia, and `custom`.
+
+**Build pipelines from the chat.** Ask *"create a pipeline that summarizes an
+invoice and scores the vendor"* and the agent reads the MCP tool catalog
+(`GET /mcp-tools`), authors a v2 pipeline, registers it, and runs it once. The
+deploy step requires `pipeline.deploy`, checked as the logged-in user. Authored
+pipelines are stored on the `mcpfinder_pipelines` volume (a PVC on k8s), so they
+survive `docker compose up --build`. `scripts/e2e-local-llm.sh` exercises the
+whole path against a running stack.
 
 Because it is plain OpenAI-compatible HTTP, a model you fine-tuned yourself
 (e.g. a LoRA served by NIM or vLLM) drops in the same way — train a domain model

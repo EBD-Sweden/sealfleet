@@ -66,17 +66,42 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/tools")
-def tools() -> list[dict[str, str]]:
+def tools() -> list[dict[str, Any]]:
+    # `inputs` names every accepted argument. Agents that author pipelines read
+    # this catalog (via the router's /mcp-tools), so it must match the function
+    # signatures exactly — an unknown kwarg is a 400 from /call.
     return [
-        {"name": "summarize_fake_invoice", "description": "Summarize a fake demo invoice."},
-        {"name": "score_fake_vendor", "description": "Score a fake demo vendor."},
+        {
+            "name": "summarize_fake_invoice",
+            "description": "Summarize a fake demo invoice.",
+            "inputs": {
+                "invoice_id": "str — demo invoice id",
+                "amount_usd": "float — invoice amount",
+                "vendor_name": "str — vendor name",
+            },
+        },
+        {
+            "name": "score_fake_vendor",
+            "description": "Score a fake demo vendor.",
+            "inputs": {
+                "vendor_name": "str — vendor name",
+                "country": "str — ISO country code",
+                "risk_hint": "str, optional — free-text risk note",
+            },
+        },
     ]
 
 
 @app.post("/call")
 def call_tool(call: ToolCall) -> dict[str, Any]:
     if call.tool == "summarize_fake_invoice":
-        return summarize_fake_invoice(**call.inputs)
-    if call.tool == "score_fake_vendor":
-        return score_fake_vendor(**call.inputs)
-    raise HTTPException(status_code=404, detail="unknown demo sandbox tool")
+        fn = summarize_fake_invoice
+    elif call.tool == "score_fake_vendor":
+        fn = score_fake_vendor
+    else:
+        raise HTTPException(status_code=404, detail="unknown demo sandbox tool")
+    try:
+        return fn(**call.inputs)
+    except TypeError as e:
+        # Wrong/missing argument names are the caller's error, not a crash.
+        raise HTTPException(status_code=400, detail=f"{call.tool}: {e}") from e

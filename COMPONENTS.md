@@ -121,7 +121,7 @@
 
 ---
 
-## `core-agent/` — LLM-Powered Core Agent
+## `agent/` — LLM-Powered Core Agent (chat)
 **Status:** ✅ MVP complete
 **Purpose:** Reference agent that discovers runtime capabilities, uses LLM to map natural language questions to output_type+inputs, executes via /resolve, and returns formatted answers
 **Language:** Python
@@ -129,14 +129,24 @@
 **Port:** 8050
 
 **Modules:**
-- `agent/server.py` — **the deployed service** (built by `agent/Dockerfile`, used by
-  compose and k8s). Lists named *and* v2 pipelines, one LLM call to select a
-  pipeline + extract args, keyword fallback on LLM timeout ✅
+- `agent/server.py` — the service (built by `agent/Dockerfile`; compose service
+  `core-agent`, k8s deployment `core-agent`). Lists named *and* v2 pipelines,
+  one LLM call to select a pipeline + extract args, keyword fallback on LLM
+  timeout, LLM-written prose answers ✅
+- `agent/mcp.yaml` — Self-describing MCP manifest ✅
 - `agent/requirements.txt` — Python dependencies ✅
-- `core-agent/agent.py` — earlier `/resolve`-based variant; not containerised.
-  Reads `LLM_BASE_URL`/`LLM_MODEL`, whereas the deployed `agent/server.py` reads
-  `OPENAI_BASE_URL`/`OPENAI_MODEL` ⚠️ *(divergence — consolidate)*
-- `core-agent/mcp.yaml` — Self-describing MCP manifest ✅
+- *(the earlier, uncontainerised `core-agent/agent.py` was removed — it read
+  different env vars from what k8s set and nothing built it)*
+
+**Pipeline authoring from chat:** a pseudo-tool `__create_pipeline__` is offered
+in the same selection call as real pipelines. When chosen, the agent fetches the
+MCP tool catalog (`GET /mcp-tools`), asks the model for a v2 pipeline definition,
+registers it via `POST /v2/pipelines/deploy` (needs `pipeline.deploy` — authorized
+as the delegated user), then runs it once so the user sees it working. Selection
+and authoring run at `temperature=0`; authoring requests `response_format:
+json_object` (guided decoding on vLLM/NIM/OpenAI-compatible servers), falls back
+to unconstrained output if the provider rejects it, and makes one repair pass on
+near-JSON before giving up.
 
 **Configuration:**
 - `ROUTER_URL` — runtime router (default `http://localhost:8040`)
@@ -147,9 +157,30 @@
 
 **Key interfaces:**
 - `GET /health` — Health check
-- `POST /ask` — Natural language question → LLM pipeline selection → pipeline run → formatted answer
+- `GET /models` — Brains the caller may plan with: on-box `local/…`, the
+  platform's cloud default, and the tenant's own `byo/…` credentials (listed
+  as the delegated user; empty without identity)
+- `POST /ask` — `{question, model?, credential_id?, base_url?}` → pipeline
+  selection (or authoring) → run → prose answer. Identity headers
+  `X-McpFinder-User-Id/Tenant-Id/Groups` are forwarded to every router call.
 
 ---
+
+## Router endpoints added for chat + authoring
+- `GET /mcp-tools` — every callable MCP tool with its input description,
+  aggregated from each MCP's `/tools` (accepts both `{"tools":[…]}` and bare-list
+  shapes). Unreachable MCPs fall back to manifest tool names plus a `warning`.
+- `GET /v2/pipelines` — now includes `input_schema` (JSON Schema; required =
+  "no default") and a description fallback from `expected_output`.
+- `POST /v2/pipelines/run` — step results now carry `mcp`/`tool` (or
+  `pipeline`) so callers can render the resolved chain.
+- `DELETE /v2/pipelines/{name}` — remove a runtime-authored pipeline (file +
+  registration). Requires `pipeline.deploy`. Shipped examples return 409.
+- **Pipeline storage:** seeds ship in the image (`runtime/pipelines/v2`, refreshed
+  on rebuild); pipelines authored at runtime are written to `PIPELINES_DATA_DIR`
+  (`/data/pipelines` — a named volume in compose, a PVC in k8s) so they survive
+  container recreation. Both are loaded; a data-dir pipeline overrides a seed of
+  the same name. Unset → seed dir only (dev/tests).
 
 ## `runtime/llm-proxy/` — Single LLM Entry Point
 **Status:** ✅ Working

@@ -29,6 +29,12 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.router.persistence.enabled }}
+      volumes:
+        - name: pipelines
+          persistentVolumeClaim:
+            claimName: {{ $name }}-pipelines
+      {{- end }}
       containers:
         - name: router
           image: {{ include "mcpfinder.image" (dict "ctx" . "svc" .Values.router) | quote }}
@@ -37,7 +43,16 @@ spec:
             {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:
             - containerPort: {{ .Values.router.port }}
+          {{- if .Values.router.persistence.enabled }}
+          volumeMounts:
+            - name: pipelines
+              mountPath: {{ .Values.router.persistence.mountPath }}
+          {{- end }}
           env:
+            {{- if .Values.router.persistence.enabled }}
+            - name: PIPELINES_DATA_DIR
+              value: {{ .Values.router.persistence.mountPath | quote }}
+            {{- end }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -93,6 +108,26 @@ spec:
             periodSeconds: 30
           resources:
             {{- toYaml .Values.router.resources | nindent 12 }}
+{{- if .Values.router.persistence.enabled }}
+---
+# Pipelines authored at runtime. See router.persistence in values.yaml for the
+# multi-replica caveat.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-pipelines
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: router
+spec:
+  accessModes: [{{ .Values.router.persistence.accessMode | quote }}]
+  {{- if .Values.router.persistence.storageClass }}
+  storageClassName: {{ .Values.router.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.router.persistence.size }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

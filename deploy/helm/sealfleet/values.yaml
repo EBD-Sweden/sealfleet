@@ -173,6 +173,19 @@ router:
   #  K8S_SCALE_TO_ZERO: "true"
   #  MCP_IDLE_TIMEOUT: "300"
   #  LLM_MODEL: "anthropic/claude-haiku-4-5"
+  # -- Storage for pipelines authored at runtime (portal chat, POST
+  #    /v2/pipelines/deploy). Shipped example pipelines stay in the image; this
+  #    volume keeps the authored ones across pod restarts and image upgrades.
+  #    NOTE: pipelines are stored as files, so with replicas > 1 every replica
+  #    must see the same volume — use a ReadWriteMany-capable storageClass and
+  #    set accessMode accordingly, or run one replica. Otherwise a pipeline
+  #    authored on one replica is invisible to the others.
+  persistence:
+    enabled: true
+    size: 256Mi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    mountPath: /data/pipelines
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 256Mi }
@@ -272,9 +285,10 @@ containerSecurityContext:
     drop: ["ALL"]
   seccompProfile:
     type: RuntimeDefault
-  # readOnlyRootFilesystem is not enabled by default: the router persists
-  # generated pipeline docs to its image filesystem. Enable per-deployment once
-  # a writable volume is mounted (see the chart README hardening notes).
+  # readOnlyRootFilesystem is not enabled by default. Runtime-authored pipelines
+  # now go to the router.persistence volume (not the image filesystem), so it
+  # can be enabled per-deployment once you have confirmed nothing else writes
+  # under /app (see the chart README hardening notes).
   readOnlyRootFilesystem: false
 
 # -- Common labels/annotations merged onto all resources.

@@ -31,7 +31,7 @@ from typing import Mapping
 
 import httpx
 import yaml
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
@@ -3093,6 +3093,47 @@ async def list_manifests(request: Request):
     ]
 
 
+@app.get("/mcp-tools")
+async def list_mcp_tools(request: Request):
+    """Every callable MCP tool with its input description, for pipeline authoring.
+
+    A manifest lists tool *names* only; the input shape lives on the MCP itself.
+    An agent building a pipeline needs both, and reaching each MCP directly is
+    not open to it (network policy, and it holds no MCP credentials), so the
+    router aggregates. Unreachable MCPs are reported, not fatal.
+    """
+    tenant_id = get_tenant_id(request)
+    visible = [
+        m for name, m in manifests.items()
+        if _registry_item_visible("manifest", name, tenant_id)
+    ]
+
+    def _normalize(payload) -> list[dict]:
+        """MCP servers disagree on this shape: some return {"tools": [...]},
+        others a bare list. Accept both, and keep only named entries."""
+        raw = payload.get("tools", []) if isinstance(payload, dict) else payload
+        if not isinstance(raw, list):
+            return []
+        return [t for t in raw if isinstance(t, dict) and t.get("name")]
+
+    async def _fetch(m) -> dict:
+        entry = {"mcp": m.name, "endpoint": m.endpoint, "tools": []}
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{m.endpoint.rstrip('/')}/tools")
+                resp.raise_for_status()
+                entry["tools"] = _normalize(resp.json())
+        except Exception as e:
+            entry["warning"] = f"schema unavailable: {type(e).__name__}"
+        if not entry["tools"]:
+            # Names from the manifest are still useful without an input schema.
+            entry["tools"] = [{"name": t} for t in (m.tools or [])]
+        return entry
+
+    results = await asyncio.gather(*(_fetch(m) for m in visible), return_exceptions=True)
+    return {"mcps": [r for r in results if isinstance(r, dict)]}
+
+
 @app.get("/manifests/{name}")
 async def get_manifest(name: str, request: Request):
     tenant_id = get_tenant_id(request)
@@ -4927,13 +4968,36 @@ def _enforce_demo_sandbox_boundary(
     return None
 
 
+# Pipelines live in two places:
+#   seed dir — shipped in the image (runtime/pipelines/v2). Read-only in spirit;
+#              updated by rebuilding the image.
+#   data dir — PIPELINES_DATA_DIR, a mounted volume. Where pipelines authored at
+#              runtime (chat, /v2/pipelines/deploy) are written so they survive
+#              container recreation. Unset → falls back to the seed dir (dev,
+#              tests), which is the pre-existing behaviour.
+_V2_SEED_DIR = (Path(__file__).parent / "pipelines" / "v2").resolve()
+
+
+def _v2_data_dir() -> Path:
+    configured = os.environ.get("PIPELINES_DATA_DIR", "").strip()
+    return Path(configured).resolve() if configured else _V2_SEED_DIR
+
+
+def _v2_pipeline_dirs() -> list[Path]:
+    """Seed first, data second, so a runtime-authored pipeline can override a
+    shipped one of the same name."""
+    data = _v2_data_dir()
+    return [_V2_SEED_DIR] if data == _V2_SEED_DIR else [_V2_SEED_DIR, data]
+
+
 def _load_yaml_pipeline_v2():
-    """Scan runtime/pipelines/v2/ for YAML pipeline definitions and load them."""
-    v2_dir = Path(__file__).parent / "pipelines" / "v2"
-    if not v2_dir.exists():
-        return
+    """Load YAML pipeline definitions from the seed dir, then the data dir."""
+    files: list[Path] = []
+    for d in _v2_pipeline_dirs():
+        if d.exists():
+            files.extend(sorted(d.glob("*.yaml")))
     count = 0
-    for yaml_file in sorted(v2_dir.glob("*.yaml")):
+    for yaml_file in files:
         try:
             data = yaml.safe_load(yaml_file.read_text())
             if not data or not isinstance(data, dict):
@@ -5232,7 +5296,7 @@ async def deploy_v2_pipeline(request: Request):
     if not isinstance(name, str) or not _PIPELINE_NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="pipeline name must match ^[A-Za-z0-9_-]{1,128}$")
 
-    v2_dir = (Path(__file__).parent / "pipelines" / "v2").resolve()
+    v2_dir = _v2_data_dir()
     v2_dir.mkdir(parents=True, exist_ok=True)
     dest = (v2_dir / f"{name}.yaml").resolve()
     # Defense in depth: the resolved path must stay inside the pipelines dir.
@@ -5244,6 +5308,33 @@ async def deploy_v2_pipeline(request: Request):
     v2_pipelines[name] = data
 
     return {"status": "deployed", "name": name, "path": str(dest)}
+
+
+@app.delete("/v2/pipelines/{name}", status_code=204)
+async def delete_v2_pipeline(name: str, request: Request):
+    """Remove a runtime-authored pipeline (file + registration).
+
+    Only pipelines in the data dir can be deleted: the examples shipped in the
+    image are part of the release, and deleting one would silently resurrect
+    on the next restart anyway. Same gate as deploy — it changes the shared
+    pipeline set.
+    """
+    _authorize_action(request, "pipeline.deploy")
+    if not isinstance(name, str) or not _PIPELINE_NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="invalid pipeline name")
+    if name not in v2_pipelines:
+        raise HTTPException(status_code=404, detail=f"V2 pipeline '{name}' not found")
+
+    data_dir = _v2_data_dir()
+    path = (data_dir / f"{name}.yaml").resolve()
+    if path.parent != data_dir or not path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{name}' is a shipped example pipeline and cannot be deleted",
+        )
+    path.unlink()
+    v2_pipelines.pop(name, None)
+    return Response(status_code=204)
 
 
 @app.get("/v2/pipelines/{name}")

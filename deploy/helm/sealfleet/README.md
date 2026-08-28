@@ -100,6 +100,28 @@ Prod-leaning defaults already set: `router.requireAuth=true`,
 
 See `values.yaml` for the full set (per-service replicas/resources, etc.).
 
+## Runtime-authored pipelines (`router.persistence`)
+
+Pipelines created at runtime — from the portal chat ("create a pipeline that…")
+or `POST /v2/pipelines/deploy` — are written to a PVC mounted at
+`router.persistence.mountPath` (`/data/pipelines`) and survive pod restarts and
+image upgrades. The example pipelines shipped in the image are unaffected.
+
+Pipelines are stored as files, so with `router.replicas > 1` every replica must
+mount the same volume: set `router.persistence.accessMode: ReadWriteMany` on a
+storage class that supports it (NFS, EFS, Filestore, …), or run one replica.
+With a `ReadWriteOnce` claim and several replicas, a pipeline authored on one
+replica is not visible to the others.
+
+```yaml
+router:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 256Mi
+    accessMode: ReadWriteOnce
+```
+
 ## The migrate Job
 
 Runs as a `post-install,post-upgrade` Helm hook. An init container clones

@@ -17,6 +17,13 @@ spec:
         app: mcp-router
     spec:
       serviceAccountName: mcp-router-sa
+      # Make the pipelines PVC writable by the non-root app user.
+      securityContext:
+        fsGroup: 10001
+      volumes:
+        - name: pipelines
+          persistentVolumeClaim:
+            claimName: mcp-router-pipelines
       containers:
         - name: mcp-router
           image: mcpfinder-registry:5050/mcp-router:latest
@@ -29,6 +36,11 @@ spec:
             capabilities:
               drop: ["ALL"]
           imagePullPolicy: IfNotPresent
+          # Runtime-authored pipelines (chat / POST /v2/pipelines/deploy) persist
+          # here; shipped example pipelines remain in the image.
+          volumeMounts:
+            - name: pipelines
+              mountPath: /data/pipelines
           ports:
             - containerPort: 8040
           envFrom:
@@ -57,6 +69,8 @@ spec:
               value: "http://host.k3d.internal:3456/v1"
             - name: LLM_MODEL
               value: "anthropic/claude-haiku-4-5"
+            - name: PIPELINES_DATA_DIR
+              value: "/data/pipelines"
           readinessProbe:
             httpGet:
               path: /ready
@@ -90,3 +104,19 @@ spec:
     - port: 8040
       targetPort: 8040
       nodePort: 30040
+---
+# Storage for pipelines authored at runtime. Small: pipeline definitions are
+# YAML files of a few KB each.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mcp-router-pipelines
+  namespace: default
+  labels:
+    app: mcp-router
+    part-of: mcpfinder
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 256Mi

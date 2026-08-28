@@ -214,6 +214,163 @@ async def resolve_llm_key(credential_id: str, identity: dict) -> str | None:
         return None
 
 
+# A pseudo-tool offered alongside real pipelines so the same selection call can
+# route "build me a pipeline that…" without a separate intent classifier.
+CREATE_PIPELINE_TOOL = "__create_pipeline__"
+
+
+async def fetch_mcp_tools(identity: dict | None = None) -> list[dict]:
+    """Callable MCP tools with their input shapes — the vocabulary for authoring."""
+    try:
+        resp = await http.get(f"{ROUTER_URL}/mcp-tools", headers=identity)
+        resp.raise_for_status()
+        return resp.json().get("mcps", [])
+    except Exception as e:
+        print(f"[core-agent] mcp tool catalog unavailable: {e}")
+        return []
+
+
+def _format_mcp_catalog(mcps: list[dict]) -> str:
+    lines = []
+    for m in mcps:
+        for t in m.get("tools", []):
+            detail = t.get("inputs") or t.get("description") or ""
+            lines.append(f"- mcp: {m['mcp']}, tool: {t['name']}, inputs: {detail}")
+    return "\n".join(lines) or "(none available)"
+
+
+async def author_pipeline(
+    question: str, mcps: list[dict], model: str | None, llm_headers: dict | None
+) -> tuple[dict | None, str]:
+    """Ask the model for a v2 pipeline definition. Returns (pipeline_def, note)."""
+    catalog = _format_mcp_catalog(mcps)
+    prompt = f"""You author McpFinder v2 pipelines. Build one for this request:
+"{question}"
+
+You may ONLY use these MCP tools:
+{catalog}
+
+Reply with ONLY a JSON object (no markdown fence) in this exact shape:
+{{
+  "name": "snake_case_name",
+  "version": 2,
+  "description": "one sentence describing when to use this pipeline",
+  "inputs": {{"some_input": {{"type": "string|number|list", "default": <value>, "description": "..."}}}},
+  "steps": [
+    {{"id": "step_id", "mcp": "<mcp name>", "tool": "<tool name>",
+     "inputs": {{"tool_arg": "{{{{inputs.some_input}}}}"}}}}
+  ],
+  "output": {{"result": "{{{{steps.step_id.output}}}}"}}
+}}
+
+Rules:
+- name must match ^[A-Za-z0-9_-]{{1,128}}$
+- every step needs id, mcp and tool, all from the list above
+- reference a pipeline input as {{{{inputs.<name>}}}} and an earlier step as {{{{steps.<id>.output}}}}
+- give every input a default so the pipeline can run with no arguments"""
+
+    selected = model or OPENAI_MODEL
+    generous = needs_generous_budget(selected)
+    # A reasoning model spends part of this thinking before it writes the
+    # definition, so the budget is well above the ~800 tokens a definition needs.
+    max_tokens = (LOCAL_LLM_MAX_TOKENS * 4) if generous else 1500
+    timeout = (LOCAL_LLM_TIMEOUT if generous else LLM_TIMEOUT) * 2
+
+    async def _complete(messages: list[dict], json_mode: bool):
+        kwargs = dict(
+            model=selected, messages=messages, max_tokens=max_tokens,
+            temperature=0, extra_headers=llm_headers or None,
+        )
+        # Guided decoding guarantees syntactically valid JSON where the server
+        # supports it (vLLM/NIM, OpenAI, most OpenAI-compatible providers).
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        resp = await asyncio.wait_for(llm.chat.completions.create(**kwargs), timeout=timeout)
+        choice = resp.choices[0]
+        return (
+            (choice.message.content or "").strip(),
+            choice.finish_reason,
+            len(getattr(choice.message, "reasoning", None) or ""),
+        )
+
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        try:
+            text, finish, thought = await _complete(messages, json_mode=True)
+        except Exception as e:
+            # Not every provider accepts response_format; fall back rather than fail.
+            print(f"[core-agent] json_mode rejected ({type(e).__name__}); retrying unconstrained")
+            text, finish, thought = await _complete(messages, json_mode=False)
+    except Exception as e:
+        return None, f"Could not author a pipeline: {e}"
+
+    def _extract(raw: str) -> dict | None:
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            raw = raw.rsplit("```", 1)[0]
+        start, end = raw.find("{"), raw.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        try:
+            return json.loads(raw[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+
+    definition = _extract(text)
+    if definition is not None:
+        return definition, ""
+
+    if not text or text.find("{") == -1:
+        detail = f"finish_reason={finish}, content={len(text)} chars, reasoning={thought} chars"
+        if finish == "length":
+            detail += " — the token budget ran out before the definition; raise LOCAL_LLM_MAX_TOKENS"
+        print(f"[core-agent] authoring produced no definition ({detail})")
+        return None, f"The model did not return a pipeline definition ({detail})."
+
+    # Near-JSON: one repair pass, handing the model its own output and the error.
+    try:
+        json.loads(text[text.find("{"):text.rfind("}") + 1])
+        err = "unknown"
+    except json.JSONDecodeError as e:
+        err = str(e)
+    repair = messages + [
+        {"role": "assistant", "content": text},
+        {"role": "user", "content": f"That JSON is invalid ({err}). Return the corrected JSON object only."},
+    ]
+    try:
+        fixed, _, _ = await _complete(repair, json_mode=True)
+    except Exception:
+        try:
+            fixed, _, _ = await _complete(repair, json_mode=False)
+        except Exception as e:
+            return None, f"The model returned invalid JSON ({err}) and the repair attempt failed: {e}"
+    definition = _extract(fixed)
+    if definition is not None:
+        print("[core-agent] authoring succeeded after one JSON repair pass")
+        return definition, ""
+    return None, f"The model returned invalid JSON even after a repair attempt: {err}"
+
+
+async def deploy_pipeline(pipeline_def: dict, identity: dict) -> tuple[bool, str]:
+    """Register an authored pipeline. Needs pipeline.deploy — it writes to the
+    server and joins the shared pipeline set, so it is deliberately privileged."""
+    try:
+        resp = await http.post(
+            f"{ROUTER_URL}/v2/pipelines/deploy",
+            json={"pipeline": pipeline_def},
+            headers=identity,
+        )
+    except Exception as e:
+        return False, f"Deploy request failed: {e}"
+
+    if resp.status_code == 403:
+        return False, "You do not have permission to create pipelines (pipeline.deploy)."
+    if resp.status_code >= 400:
+        # The router's validation errors are the useful part here.
+        return False, f"Pipeline rejected: {resp.text[:300]}"
+    return True, ""
+
+
 async def fetch_pipeline_tools(identity: dict | None = None) -> list[dict]:
     """Tools the agent can call: named pipelines plus v2 pipelines.
 
@@ -277,6 +434,35 @@ def template_answer(pipeline_name: str, raw_result: dict, location: str) -> str:
     return json.dumps(raw_result, indent=2)[:300]
 
 
+# Budget for the pipeline result inside the answer-writing prompt. ~3k tokens:
+# comfortably inside every model we route to, without starving the answer.
+RESULT_PROMPT_CHARS = int(os.getenv("RESULT_PROMPT_CHARS", "12000"))
+
+
+def _fit_result_for_prompt(raw_result, limit: int = RESULT_PROMPT_CHARS) -> str:
+    """Serialise a pipeline result so it fits the prompt without losing the summary.
+
+    Cutting the tail of a JSON dump mid-object hands the model mangled data and
+    it concludes "no information" — even though the useful part (a ranking, a
+    score) usually sits AFTER the bulky raw records. So instead, drop whole
+    top-level keys largest-first, leaving a marker, until it fits.
+    """
+    compact = lambda v: json.dumps(v, separators=(",", ":"), default=str)  # noqa: E731
+    text = compact(raw_result)
+    if len(text) <= limit or not isinstance(raw_result, dict):
+        return text[:limit]
+
+    trimmed = dict(raw_result)
+    by_size = sorted(trimmed, key=lambda k: len(compact(trimmed[k])), reverse=True)
+    for key in by_size:
+        size = len(compact(trimmed[key]))
+        trimmed[key] = f"[omitted {size} chars of detail]"
+        text = compact(trimmed)
+        if len(text) <= limit:
+            return text
+    return text[:limit]
+
+
 async def summarize_result(
     question: str, pipeline_name: str, raw_result: dict, model: str | None,
     llm_headers: dict | None = None,
@@ -287,7 +473,7 @@ async def summarize_result(
     """
     selected = model or OPENAI_MODEL
     generous = needs_generous_budget(selected)
-    payload = json.dumps(raw_result)[:6000]
+    payload = _fit_result_for_prompt(raw_result)
     prompt = (
         f'Question: "{question}"\n\n'
         f"Result from the `{pipeline_name}` pipeline:\n{payload}\n\n"
@@ -324,13 +510,20 @@ async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: 
     )
     prompt = f"""Available pipeline tools:
 {tools_desc}
+- {CREATE_PIPELINE_TOOL}: build and register a NEW pipeline. Choose this only
+  when the user asks to create, build, add or define a pipeline or workflow —
+  never to answer a question an existing tool already covers.
 
 User question: "{question}"
 
 Respond with ONLY valid JSON (no markdown):
 {{"tool": "<tool_name>", "arguments": {{"<param>": "<value>"}}}}
 
-If no tool matches: {{"tool": null, "arguments": {{}}}}"""
+Pick the tool whose purpose covers the question's topic. Every argument has a
+default, so never return null because the question omits one — pass only what
+the question states.
+Return null ONLY when no tool's purpose relates to the question at all:
+{{"tool": null, "arguments": {{}}}}"""
 
     selected = model or OPENAI_MODEL
     generous = needs_generous_budget(selected)
@@ -343,6 +536,9 @@ If no tool matches: {{"tool": null, "arguments": {{}}}}"""
                 model=selected,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=budget_tokens,
+                # Tool choice must be reproducible: the same question should
+                # pick the same pipeline every time, not depend on sampling.
+                temperature=0,
                 extra_headers=llm_headers or None,
             ),
             timeout=budget_timeout,
@@ -502,7 +698,62 @@ async def ask(req: AskRequest, request: Request):
         req.question, pipeline_tools, req.model, llm_headers
     )
 
-    # 3. Keyword fallback if LLM didn't resolve
+    # 3a. Authoring request: build the pipeline, register it, then run it so the
+    #     user sees it working rather than just being told it exists.
+    if pipeline_name == CREATE_PIPELINE_TOOL:
+        mcps = await fetch_mcp_tools(identity)
+        if not mcps:
+            raise HTTPException(502, "No MCP tools available to build a pipeline from")
+
+        pipeline_def, note = await author_pipeline(
+            req.question, mcps, req.model, llm_headers
+        )
+        if not pipeline_def:
+            return AskResponse(
+                question=req.question, output_type="pipeline.create", resolved_chain=[],
+                inputs_used={}, answer=note, raw_result={},
+                reasoning=reasoning + " " + note,
+            )
+
+        ok, err = await deploy_pipeline(pipeline_def, identity)
+        if not ok:
+            return AskResponse(
+                question=req.question, output_type="pipeline.create", resolved_chain=[],
+                inputs_used={}, answer=err,
+                raw_result={"attempted": pipeline_def},
+                reasoning=reasoning + f" Deploy failed: {err}",
+            )
+
+        new_name = pipeline_def["name"]
+        try:
+            result = await run_pipeline(new_name, {}, "v2", identity)
+        except Exception as e:
+            return AskResponse(
+                question=req.question, output_type="pipeline.create",
+                resolved_chain=[], inputs_used={},
+                answer=f"Created pipeline '{new_name}', but the first run failed: {e}",
+                raw_result={"pipeline": pipeline_def},
+                reasoning=reasoning + " Created but first run failed.",
+            )
+
+        results = result.get("results") or {}
+        chain = [
+            f"{r['mcp']}.{r['tool']}" if r.get("mcp") else step_id
+            for step_id, r in results.items() if isinstance(r, dict)
+        ]
+        steps = len(pipeline_def.get("steps", []))
+        return AskResponse(
+            question=req.question, output_type="pipeline.create",
+            resolved_chain=chain, inputs_used=pipeline_def.get("inputs", {}),
+            answer=(
+                f"Created pipeline '{new_name}' with {steps} step(s) and ran it "
+                f"successfully. You can now ask for it by name."
+            ),
+            raw_result={"pipeline": pipeline_def, "first_run": result.get("output") or result},
+            reasoning=reasoning + f" Authored and deployed '{new_name}'.",
+        )
+
+    # 3b. Keyword fallback if LLM didn't resolve
     if not pipeline_name:
         pipeline_name = detect_pipeline(req.question)
         if pipeline_name:
