@@ -167,7 +167,7 @@ as the logged-in user.
 invoice and scores the vendor"* and the agent reads the MCP tool catalog
 (`GET /mcp-tools`), authors a v2 pipeline, registers it, and runs it once. The
 deploy step requires `pipeline.deploy`, checked as the logged-in user. Authored
-pipelines are stored on the `mcpfinder_pipelines` volume (a PVC on k8s), so they
+pipelines are stored on the `sealfleet_pipelines` volume (a PVC on k8s), so they
 survive `docker compose up --build`. `scripts/e2e-local-llm.sh` exercises the
 whole path against a running stack.
 
