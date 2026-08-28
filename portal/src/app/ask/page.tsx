@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Send, Loader2, ChevronDown, ChevronUp, Cpu, Cloud } from "lucide-react";
+import { Send, Loader2, ChevronDown, ChevronUp, Cpu, Cloud, KeyRound } from "lucide-react";
 
 // --- Types ---
 
@@ -22,8 +22,12 @@ interface AskResponse {
 interface BrainOption {
   id: string;
   label: string;
-  kind: "local" | "cloud";
+  kind: "local" | "cloud" | "byo";
   description: string;
+  /** Present for "byo/…" brains: the stored credential backing the provider. */
+  credential_id?: string;
+  /** Present for a "byo/custom/…" brain: the tenant's own endpoint. */
+  base_url?: string;
 }
 
 interface ChatMessage {
@@ -88,12 +92,22 @@ export default function AskPage() {
     ]);
     setLoading(true);
 
+    const selected = brains.find((b) => b.id === model);
     const start = Date.now();
     try {
       const res = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(model ? { question, model } : { question }),
+        body: JSON.stringify(
+          model
+            ? {
+                question,
+                model,
+                ...(selected?.credential_id ? { credential_id: selected.credential_id } : {}),
+                ...(selected?.base_url ? { base_url: selected.base_url } : {}),
+              }
+            : { question },
+        ),
       });
 
       const elapsed = Date.now() - start;
@@ -207,7 +221,7 @@ export default function AskPage() {
             <div className="flex gap-1.5 flex-wrap">
               {brains.map((b) => {
                 const active = b.id === model;
-                const Icon = b.kind === "local" ? Cpu : Cloud;
+                const Icon = b.kind === "local" ? Cpu : b.kind === "byo" ? KeyRound : Cloud;
                 return (
                   <button
                     key={b.id}

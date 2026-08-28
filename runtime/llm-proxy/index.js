@@ -53,6 +53,27 @@ const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || "";
 const LOCAL_LLM_TIMEOUT_MS = parseInt(process.env.LOCAL_LLM_TIMEOUT_MS || "300000", 10);
 const LOCAL_PREFIX = "local/";
 
+// Bring-your-own provider: "byo/<provider>/<model>". The caller supplies the
+// key per request (resolved from the platform credential store upstream) —
+// this proxy never stores or logs it.
+const BYO_PREFIX = "byo/";
+const BYO_KEY_HEADER = "x-mcpfinder-llm-key";
+const BYO_BASE_URL_HEADER = "x-mcpfinder-llm-base-url";
+const BYO_TIMEOUT_MS = parseInt(process.env.BYO_LLM_TIMEOUT_MS || "90000", 10);
+
+// Known OpenAI-compatible providers. "custom" takes its base URL from the
+// request header, so a tenant can point at a private or regional endpoint.
+const BYO_PROVIDERS = {
+  openai: "https://api.openai.com/v1",
+  groq: "https://api.groq.com/openai/v1",
+  mistral: "https://api.mistral.ai/v1",
+  together: "https://api.together.xyz/v1",
+  deepseek: "https://api.deepseek.com/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+  nvidia: "https://integrate.api.nvidia.com/v1",
+  custom: "",
+};
+
 // --- Map OpenAI model names to Anthropic model IDs ---
 const MODEL_MAP = {
   "anthropic/claude-haiku-4-5": "claude-haiku-4-5-20251001",
@@ -240,36 +261,35 @@ function callVercelGateway(openAiBody) {
   });
 }
 
-/** Forward request to a local OpenAI-compatible server (NIM / vLLM / llama.cpp / Ollama) */
-function callLocal(openAiBody) {
+/**
+ * POST an OpenAI-compatible chat completion to any base URL.
+ * Shared by the local route and the bring-your-own-provider route.
+ *
+ * `label` only shapes error messages; `apiKey` is omitted for servers that
+ * don't authenticate (a local NIM/vLLM on the host network).
+ */
+function callOpenAiCompatible({ baseUrl, model, body, apiKey, timeoutMs, label }) {
   return new Promise((resolve, reject) => {
-    if (!LOCAL_LLM_BASE_URL) return reject(new Error("LOCAL_LLM_BASE_URL not set"));
+    if (!baseUrl) return reject(new Error(`${label}: no base URL configured`));
 
-    // Pinned requests name the local model directly (minus the marker). Unpinned
-    // ones arrive here as a fallback still carrying a cloud model name the local
-    // server has never heard of, so serve them with the model it actually has.
-    let model = openAiBody.model || "";
-    if (model.startsWith(LOCAL_PREFIX)) {
-      model = model.slice(LOCAL_PREFIX.length) || LOCAL_LLM_MODEL;
-    } else {
-      model = LOCAL_LLM_MODEL || model;
-    }
-
-    const parsed = url.parse(LOCAL_LLM_BASE_URL);
+    const parsed = url.parse(baseUrl);
     const isHttps = parsed.protocol === "https:";
     const transport = isHttps ? https : http;
-    const payload = Buffer.from(JSON.stringify({ ...openAiBody, model }));
+    const payload = Buffer.from(JSON.stringify({ ...body, model }));
+
+    const headers = {
+      "content-type": "application/json",
+      "content-length": payload.length,
+    };
+    if (apiKey) headers["authorization"] = `Bearer ${apiKey}`;
 
     const opts = {
       hostname: parsed.hostname,
       port: parsed.port || (isHttps ? 443 : 80),
       path: (parsed.path || "").replace(/\/$/, "") + "/chat/completions",
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "content-length": payload.length,
-      },
-      timeout: LOCAL_LLM_TIMEOUT_MS,
+      headers,
+      timeout: timeoutMs,
     };
 
     const req = transport.request(opts, (res) => {
@@ -280,26 +300,83 @@ function callLocal(openAiBody) {
         let data;
         try { data = JSON.parse(raw); }
         catch {
-          // A NIM/vLLM server still building its engine answers with plain text,
-          // so surface the status and a snippet rather than a bare parse error.
+          // A NIM/vLLM server still building its engine answers with plain
+          // text, so surface the status and a snippet, not a bare parse error.
           return reject(new Error(
-            `Local LLM HTTP ${res.statusCode} (non-JSON): ${raw.slice(0, 120)}`
+            `${label} HTTP ${res.statusCode} (non-JSON): ${raw.slice(0, 120)}`
           ));
         }
-
         if ((res.statusCode || 500) >= 400) {
-          return reject(new Error(data?.error?.message || `Local LLM HTTP ${res.statusCode}`));
+          return reject(new Error(data?.error?.message || `${label} HTTP ${res.statusCode}`));
         }
         if (!Array.isArray(data?.choices)) {
-          return reject(new Error("Local LLM response missing choices"));
+          return reject(new Error(`${label} response missing choices`));
         }
         resolve(data);
       });
     });
     req.on("error", reject);
-    req.on("timeout", () => { req.destroy(); reject(new Error("Local LLM timeout")); });
+    req.on("timeout", () => { req.destroy(); reject(new Error(`${label} timeout`)); });
     req.write(payload);
     req.end();
+  });
+}
+
+/**
+ * Forward to a tenant's own provider.
+ *
+ * Anthropic is not OpenAI-compatible, so it reuses the Messages translation
+ * already in this file; everything else is a straight passthrough.
+ */
+function callByo(openAiBody, providerKey, model, apiKey, customBaseUrl) {
+  if (!apiKey) {
+    return Promise.reject(new Error("no API key supplied for the selected provider"));
+  }
+  if (providerKey === "anthropic") {
+    return callAnthropicDirect({ ...openAiBody, model }, apiKey, false);
+  }
+
+  const baseUrl = providerKey === "custom"
+    ? customBaseUrl
+    : BYO_PROVIDERS[providerKey];
+  if (!baseUrl) {
+    return Promise.reject(new Error(
+      providerKey === "custom"
+        ? `custom provider needs a ${BYO_BASE_URL_HEADER} header`
+        : `unknown provider "${providerKey}"`
+    ));
+  }
+
+  return callOpenAiCompatible({
+    baseUrl,
+    model,
+    body: openAiBody,
+    apiKey,
+    timeoutMs: BYO_TIMEOUT_MS,
+    label: `Provider ${providerKey}`,
+  });
+}
+
+/** Forward request to a local OpenAI-compatible server (NIM / vLLM / llama.cpp / Ollama) */
+function callLocal(openAiBody) {
+  if (!LOCAL_LLM_BASE_URL) return Promise.reject(new Error("LOCAL_LLM_BASE_URL not set"));
+
+  // Pinned requests name the local model directly (minus the marker). Unpinned
+  // ones arrive here as a fallback still carrying a cloud model name the local
+  // server has never heard of, so serve them with the model it actually has.
+  let model = openAiBody.model || "";
+  if (model.startsWith(LOCAL_PREFIX)) {
+    model = model.slice(LOCAL_PREFIX.length) || LOCAL_LLM_MODEL;
+  } else {
+    model = LOCAL_LLM_MODEL || model;
+  }
+
+  return callOpenAiCompatible({
+    baseUrl: LOCAL_LLM_BASE_URL,
+    model,
+    body: openAiBody,
+    timeoutMs: LOCAL_LLM_TIMEOUT_MS,
+    label: "Local LLM",
   });
 }
 
@@ -322,6 +399,7 @@ const server = http.createServer((req, res) => {
       local: LOCAL_LLM_BASE_URL
         ? { enabled: true, base_url: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL }
         : { enabled: false },
+      byo: { providers: Object.keys(BYO_PROVIDERS).concat("anthropic").sort() },
     });
   }
 
@@ -339,7 +417,36 @@ const server = http.createServer((req, res) => {
     const model = body.model || "anthropic/claude-haiku-4-5";
     console.log(`[llm-proxy] ${new Date().toISOString()} model=${model}`);
 
-    // Route 0: model pinned to the on-box server with a "local/" prefix.
+    // Route 0a: a tenant's own provider, pinned with "byo/<provider>/<model>".
+    // Like the local pin this has NO fallback: a tenant that chose its own
+    // provider must not be silently served by the platform's backend instead.
+    if (model.startsWith(BYO_PREFIX)) {
+      const rest = model.slice(BYO_PREFIX.length);
+      const slash = rest.indexOf("/");
+      const providerKey = (slash === -1 ? rest : rest.slice(0, slash)).toLowerCase();
+      const providerModel = slash === -1 ? "" : rest.slice(slash + 1);
+
+      if (!providerModel) {
+        return sendJson(400, { error: { message: `Model must be "${BYO_PREFIX}<provider>/<model>"` } });
+      }
+      try {
+        const result = await callByo(
+          body,
+          providerKey,
+          providerModel,
+          req.headers[BYO_KEY_HEADER],
+          req.headers[BYO_BASE_URL_HEADER],
+        );
+        console.log(`[llm-proxy] OK via byo:${providerKey}`);
+        return sendJson(200, result);
+      } catch (err) {
+        // Never echo the request back — it may carry the tenant's key header.
+        console.error(`[llm-proxy] byo:${providerKey} failed: ${err.message}`);
+        return sendJson(502, { error: { message: `Provider request failed: ${err.message}` } });
+      }
+    }
+
+    // Route 0b: model pinned to the on-box server with a "local/" prefix.
     // Deliberately has NO fallback — a tenant that pins local must never have
     // its prompt silently sent to a cloud provider because the box was busy.
     if (model.startsWith(LOCAL_PREFIX)) {

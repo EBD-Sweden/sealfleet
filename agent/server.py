@@ -17,7 +17,7 @@ import re
 import time
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -38,6 +38,14 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "150"))
 # back to keyword matching. Give pinned-local requests their own budgets.
 LOCAL_LLM_TIMEOUT = float(os.getenv("LOCAL_LLM_TIMEOUT", "120"))
 LOCAL_LLM_MAX_TOKENS = int(os.getenv("LOCAL_LLM_MAX_TOKENS", "1024"))
+
+# Model-name prefixes the caller pinned deliberately. We cannot know whether the
+# model behind one reasons before answering, so assume it might.
+PINNED_PREFIXES = ("local/", "byo/")
+
+
+def needs_generous_budget(model: str | None) -> bool:
+    return (model or "").startswith(PINNED_PREFIXES)
 # Router runs with REQUIRE_AUTH=true; present the operator key so /pipelines/*
 # calls are authorized and audited. Compose/k8s inject the per-deployment value.
 ROUTER_API_KEY = os.getenv("ROUTER_API_KEY", "")
@@ -63,6 +71,13 @@ class AskRequest(BaseModel):
     # Prefix "local/" pins the on-box model (the llm-proxy will not fall back
     # to a cloud backend). None → the deployment default (OPENAI_MODEL).
     model: str | None = None
+    # Which stored credential backs a "byo/<provider>/<model>" choice. Not
+    # trusted from the client: the router resolves it tenant-scoped as the
+    # logged-in user, so a forged id from another tenant simply fails.
+    credential_id: str | None = None
+    # For a "byo/custom/…" model: the endpoint to call. Not a secret; the
+    # credential it pairs with is still resolved server-side.
+    base_url: str | None = None
 
 
 class AskResponse(BaseModel):
@@ -94,7 +109,112 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 
-async def fetch_pipeline_tools() -> list[dict]:
+# Identity the portal delegates for the logged-in user. The router trusts these
+# only for API keys with allow_identity_delegation, so the agent's own key still
+# gates the call — these decide *who* it is authorized as.
+DELEGATION_HEADERS = (
+    "X-McpFinder-User-Id",
+    "X-McpFinder-Tenant-Id",
+    "X-McpFinder-Groups",
+)
+
+# Reserved credential scope: assigned_mcp = "llm:<provider>[:<model>]".
+LLM_CRED_PREFIX = "llm:"
+
+# Used when a credential names a provider but no model.
+PROVIDER_DEFAULT_MODEL = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-sonnet-4-6",
+    "groq": "llama-3.3-70b-versatile",
+    "mistral": "mistral-large-latest",
+    "deepseek": "deepseek-chat",
+    "nvidia": "nvidia/llama-3.3-nemotron-super-49b-v1",
+}
+
+
+def delegated(request: Request) -> dict:
+    """Pass the caller's identity through to the router, if the portal sent it."""
+    return {
+        h: request.headers[h]
+        for h in DELEGATION_HEADERS
+        if request.headers.get(h)
+    }
+
+
+async def fetch_llm_credentials(identity: dict) -> list[dict]:
+    """The tenant's own LLM provider credentials, as selectable brains.
+
+    Runs as the logged-in user: the agent's operator key is deliberately denied
+    credential.* , so without delegated identity this returns nothing rather
+    than escalating.
+    """
+    if not identity:
+        return []
+    try:
+        resp = await http.get(f"{ROUTER_URL}/credentials", headers=identity)
+        if resp.status_code == 403:
+            return []  # user may not read credentials — not an error
+        resp.raise_for_status()
+        creds = resp.json().get("credentials", [])
+    except Exception as e:
+        print(f"[core-agent] credential listing unavailable: {e}")
+        return []
+
+    brains = []
+    for c in creds:
+        scope = (c.get("assigned_mcp") or "")
+        if not scope.startswith(LLM_CRED_PREFIX) or not c.get("is_active", True):
+            continue
+        # Scope grammar:
+        #   llm:<provider>                     — provider default model
+        #   llm:<provider>:<model>
+        #   llm:custom:<model>@<base_url>      — a private/self-hosted endpoint
+        parts = scope[len(LLM_CRED_PREFIX):].split(":", 1)
+        provider = parts[0].strip().lower()
+        remainder = parts[1].strip() if len(parts) > 1 else ""
+
+        base_url = ""
+        if "@" in remainder:
+            # Split on the LAST "@" so a model name may itself contain one.
+            remainder, base_url = remainder.rsplit("@", 1)
+            remainder, base_url = remainder.strip(), base_url.strip()
+
+        model = remainder or PROVIDER_DEFAULT_MODEL.get(provider, "")
+        if not provider or not model:
+            continue
+        if provider == "custom" and not base_url:
+            print(f"[core-agent] credential {c.get('name')!r}: custom provider needs @<base_url>")
+            continue
+
+        brains.append({
+            "id": f"byo/{provider}/{model}",
+            "label": c.get("name") or provider,
+            "kind": "byo",
+            "description": (
+                f"Your own endpoint ({model})." if provider == "custom"
+                else f"Your own {provider} account ({model})."
+            ),
+            "credential_id": c.get("id"),
+            **({"base_url": base_url} if base_url else {}),
+        })
+    return brains
+
+
+async def resolve_llm_key(credential_id: str, identity: dict) -> str | None:
+    """Unwrap a tenant LLM key, authorized as the logged-in user."""
+    try:
+        resp = await http.post(
+            f"{ROUTER_URL}/credentials/{credential_id}/use", headers=identity
+        )
+        resp.raise_for_status()
+        return resp.json().get("value")
+    except Exception as e:
+        # Never include the response body — it carries the secret on success.
+        print(f"[core-agent] credential resolve failed: {type(e).__name__}")
+        return None
+
+
+async def fetch_pipeline_tools(identity: dict | None = None) -> list[dict]:
     """Tools the agent can call: named pipelines plus v2 pipelines.
 
     Both APIs coexist in the router; a deployment may have either or both, so
@@ -103,7 +223,7 @@ async def fetch_pipeline_tools() -> list[dict]:
     tools: list[dict] = []
 
     try:
-        resp = await http.get(f"{ROUTER_URL}/pipelines/tools")
+        resp = await http.get(f"{ROUTER_URL}/pipelines/tools", headers=identity)
         resp.raise_for_status()
         for t in resp.json().get("tools", []):
             tools.append({**t, "_api": "named"})
@@ -111,7 +231,7 @@ async def fetch_pipeline_tools() -> list[dict]:
         print(f"[core-agent] named pipeline listing unavailable: {e}")
 
     try:
-        resp = await http.get(f"{ROUTER_URL}/v2/pipelines")
+        resp = await http.get(f"{ROUTER_URL}/v2/pipelines", headers=identity)
         resp.raise_for_status()
         for p in resp.json().get("pipelines", []):
             tools.append({
@@ -158,14 +278,15 @@ def template_answer(pipeline_name: str, raw_result: dict, location: str) -> str:
 
 
 async def summarize_result(
-    question: str, pipeline_name: str, raw_result: dict, model: str | None
+    question: str, pipeline_name: str, raw_result: dict, model: str | None,
+    llm_headers: dict | None = None,
 ) -> str:
     """Turn a pipeline result into prose. Falls back to the raw dump on any failure.
 
     Kept to one short call so a failure here costs latency, never the answer.
     """
     selected = model or OPENAI_MODEL
-    is_local = selected.startswith("local/")
+    generous = needs_generous_budget(selected)
     payload = json.dumps(raw_result)[:6000]
     prompt = (
         f'Question: "{question}"\n\n'
@@ -178,9 +299,10 @@ async def summarize_result(
             llm.chat.completions.create(
                 model=selected,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=LOCAL_LLM_MAX_TOKENS if is_local else LLM_MAX_TOKENS * 2,
+                max_tokens=LOCAL_LLM_MAX_TOKENS if generous else LLM_MAX_TOKENS * 2,
+                extra_headers=llm_headers or None,
             ),
-            timeout=LOCAL_LLM_TIMEOUT if is_local else LLM_TIMEOUT,
+            timeout=LOCAL_LLM_TIMEOUT if generous else LLM_TIMEOUT,
         )
         content = resp.choices[0].message.content
         if content and content.strip():
@@ -190,7 +312,7 @@ async def summarize_result(
     return template_answer(pipeline_name, raw_result, "")
 
 
-async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: str | None = None) -> tuple[str | None, dict, str]:
+async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: str | None = None, llm_headers: dict | None = None) -> tuple[str | None, dict, str]:
     """Single LLM call to select pipeline and extract arguments.
     Returns (pipeline_name, arguments, reasoning).
     Times out after LLM_TIMEOUT seconds → returns (None, {}, '').
@@ -211,9 +333,9 @@ Respond with ONLY valid JSON (no markdown):
 If no tool matches: {{"tool": null, "arguments": {{}}}}"""
 
     selected = model or OPENAI_MODEL
-    is_local = selected.startswith("local/")
-    budget_timeout = LOCAL_LLM_TIMEOUT if is_local else LLM_TIMEOUT
-    budget_tokens = LOCAL_LLM_MAX_TOKENS if is_local else LLM_MAX_TOKENS
+    generous = needs_generous_budget(selected)
+    budget_timeout = LOCAL_LLM_TIMEOUT if generous else LLM_TIMEOUT
+    budget_tokens = LOCAL_LLM_MAX_TOKENS if generous else LLM_MAX_TOKENS
 
     try:
         resp = await asyncio.wait_for(
@@ -221,6 +343,7 @@ If no tool matches: {{"tool": null, "arguments": {{}}}}"""
                 model=selected,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=budget_tokens,
+                extra_headers=llm_headers or None,
             ),
             timeout=budget_timeout,
         )
@@ -249,17 +372,25 @@ If no tool matches: {{"tool": null, "arguments": {{}}}}"""
         return None, {}, f"LLM error ({e}) — using keyword fallback."
 
 
-async def run_pipeline(name: str, arguments: dict, api: str = "named") -> dict:
-    """Run a pipeline through whichever router API it came from."""
+async def run_pipeline(
+    name: str, arguments: dict, api: str = "named", identity: dict | None = None
+) -> dict:
+    """Run a pipeline through whichever router API it came from.
+
+    Carries the delegated identity so audit rows name the real user rather than
+    the agent service.
+    """
     if api == "v2":
         resp = await http.post(
             f"{ROUTER_URL}/v2/pipelines/run",
             json={"pipeline": name, "inputs": arguments},
+            headers=identity,
         )
     else:
         resp = await http.post(
             f"{ROUTER_URL}/pipelines/{name}/run",
             json={"inputs": arguments},
+            headers=identity,
         )
     resp.raise_for_status()
     return resp.json()
@@ -276,7 +407,7 @@ async def health():
 
 
 @app.get("/models")
-async def models():
+async def models(request: Request):
     """Which brains this deployment can plan with, for the portal's chat picker.
 
     Asks the llm-proxy what it has configured rather than guessing, so the list
@@ -313,6 +444,9 @@ async def models():
             "description": f"Cloud provider via {mode}.",
         })
 
+    # The tenant's own providers, listed as the logged-in user.
+    brains.extend(await fetch_llm_credentials(delegated(request)))
+
     return {
         "default": OPENAI_MODEL,
         "proxy_mode": mode or "unknown",
@@ -321,21 +455,38 @@ async def models():
 
 
 @app.get("/tools")
-async def tools():
+async def tools(request: Request):
     try:
-        pipeline_tools = await fetch_pipeline_tools()
+        pipeline_tools = await fetch_pipeline_tools(delegated(request))
         return {"tools": pipeline_tools}
     except Exception as e:
         raise HTTPException(502, f"Failed to fetch tools from router: {e}")
 
 
 @app.post("/ask", response_model=AskResponse)
-async def ask(req: AskRequest):
+async def ask(req: AskRequest, request: Request):
     start = time.time()
+    identity = delegated(request)
+
+    # A "byo/" model runs on the tenant's own provider, so unwrap their key
+    # first — authorized as the logged-in user, never as the agent's own key.
+    llm_headers: dict = {}
+    if (req.model or "").startswith("byo/"):
+        if not req.credential_id:
+            raise HTTPException(400, "A bring-your-own model requires credential_id")
+        key = await resolve_llm_key(req.credential_id, identity)
+        if not key:
+            raise HTTPException(
+                403, "Could not use that provider credential. Check it is active "
+                     "and that you have permission to use it."
+            )
+        llm_headers["X-McpFinder-LLM-Key"] = key
+        if req.base_url:
+            llm_headers["X-McpFinder-LLM-Base-Url"] = req.base_url
 
     # 1. Fetch available pipeline tools
     try:
-        pipeline_tools = await fetch_pipeline_tools()
+        pipeline_tools = await fetch_pipeline_tools(identity)
     except Exception as e:
         raise HTTPException(502, f"Router unavailable: {e}")
 
@@ -348,7 +499,7 @@ async def ask(req: AskRequest):
 
     # 2. Single LLM call to select pipeline + extract args
     pipeline_name, tool_arguments, reasoning = await llm_select_pipeline(
-        req.question, pipeline_tools, req.model
+        req.question, pipeline_tools, req.model, llm_headers
     )
 
     # 3. Keyword fallback if LLM didn't resolve
@@ -379,7 +530,7 @@ async def ask(req: AskRequest):
         "named",
     )
     try:
-        result = await run_pipeline(pipeline_name, tool_arguments, pipeline_api)
+        result = await run_pipeline(pipeline_name, tool_arguments, pipeline_api, identity)
     except Exception as e:
         raise HTTPException(502, f"Pipeline '{pipeline_name}' failed: {e}")
 
@@ -398,7 +549,9 @@ async def ask(req: AskRequest):
         resolved_chain = [f"{s['mcp']}.{s['tool']}" for s in steps]
         raw_result = result.get("final", result)
 
-    answer = await summarize_result(req.question, pipeline_name, raw_result, req.model)
+    answer = await summarize_result(
+        req.question, pipeline_name, raw_result, req.model, llm_headers
+    )
 
     elapsed = round(time.time() - start, 2)
     reasoning += f" Completed in {elapsed}s."

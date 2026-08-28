@@ -166,6 +166,12 @@ without any MCP or agent knowing the difference.
 - `local/<model>` — **pinned** to `LOCAL_LLM_BASE_URL`. Never falls back to a
   cloud backend, so the request provably cannot leave the host. This is the
   guarantee regulated tenants (banks, health) need.
+- `byo/<provider>/<model>` — **pinned** to the tenant's own provider. Also has
+  no fallback: a tenant that chose its own account must not be silently served
+  by the platform's backend. The key arrives per request in the
+  `X-McpFinder-LLM-Key` header (resolved upstream from the credential store);
+  the proxy neither stores nor logs it. `byo/custom/...` takes its endpoint
+  from `X-McpFinder-LLM-Base-Url`.
 - anything else — routing priority below.
 
 **Routing priority (unpinned):**

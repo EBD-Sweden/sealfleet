@@ -2602,6 +2602,27 @@ def _permission_set_allows(permissions: set[str] | None, action: str) -> bool:
     return f"{prefix}.*" in permissions
 
 
+def _db_user_is_platform_admin(user_id: str) -> bool:
+    """True if user_id is an active platform admin, per the users table."""
+    if not user_id:
+        return False
+    conn = _get_db()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM users WHERE id::text = %s AND is_admin = TRUE AND is_active = TRUE LIMIT 1",
+            (user_id,),
+        )
+        found = cur.fetchone() is not None
+        cur.close()
+        return found
+    except Exception as e:
+        print(f"[auth] platform-admin lookup failed: {e}")
+        return False
+
+
 def _db_has_action_permission(tenant_id: str, user_id: str, groups: list[str], action: str) -> bool:
     """Check direct, role, and SCIM/IdP group-derived action grants."""
     conn = _get_db()
@@ -2700,6 +2721,16 @@ def _authorize_action(request: Request, action: str) -> None:
     if _db_has_action_permission(tenant_id, str(user_id), groups, action):
         _remember_authorized_action(request, action)
         return
+
+    # Platform admins acting through a delegating API key (the portal) never
+    # carry a JWT is_admin claim, so it must come from the DB — the same reason
+    # _mcp_access re-checks the users table. Gated on `delegated_from`, which is
+    # set only for keys with allow_identity_delegation, so a bare API key cannot
+    # escalate by inventing an X-McpFinder-User-Id header.
+    if (identity or {}).get("delegated_from") and _db_user_is_platform_admin(str(user_id)):
+        _remember_authorized_action(request, action)
+        return
+
     raise HTTPException(status_code=403, detail=f"Forbidden: missing permission {action}")
 
 

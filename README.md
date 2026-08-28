@@ -125,6 +125,23 @@ CHAT_MODEL=local/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning docker compose up
 curl localhost:3456/health        # shows mode + whether the local route is enabled
 ```
 
+**Bring your own provider.** A tenant can point the chat at its own LLM
+account instead of the platform's. Store the key as a credential scoped with
+the reserved `llm:` prefix — it is encrypted at rest, never returned to the
+browser, and never placed in a prompt:
+
+| `assigned_mcp` | Means |
+|---|---|
+| `llm:openai` | your OpenAI account, provider default model |
+| `llm:anthropic:claude-sonnet-4-6` | your Anthropic account, a named model |
+| `llm:custom:<model>@https://your-endpoint/v1` | your own OpenAI-compatible endpoint |
+
+The credential is unwrapped **as the logged-in user** — the agent's own
+operator key is deliberately denied `credential.*`, so the chat cannot reach a
+secret the user could not reach themselves, and audit records the real person.
+Known providers: openai, anthropic, groq, mistral, together, deepseek,
+openrouter, nvidia, and `custom`.
+
 Because it is plain OpenAI-compatible HTTP, a model you fine-tuned yourself
 (e.g. a LoRA served by NIM or vLLM) drops in the same way — train a domain model
 on your own data, serve it locally, and the whole platform uses it.

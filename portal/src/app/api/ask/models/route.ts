@@ -1,15 +1,21 @@
 import { NextResponse } from "next/server";
+import { requirePortalSession } from "@/lib/portal-auth";
 
 const AGENT_URL = process.env.AGENT_URL || "http://localhost:8050";
 
-/** Which brains the chat can plan with (local on-box model, cloud provider, …). */
+/** Which brains this user can plan with (local, cloud, or their tenant's own provider). */
 export async function GET() {
+  // Tenant-scoped: the list includes the tenant's own LLM credentials.
+  const { error, context } = await requirePortalSession();
+  if (error || !context) return error ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const headers: Record<string, string> = {};
+  for (const h of ["X-McpFinder-User-Id", "X-McpFinder-Tenant-Id", "X-McpFinder-Groups"]) {
+    if (context.backendHeaders[h]) headers[h] = context.backendHeaders[h];
+  }
+
   try {
-    const upstream = await fetch(`${AGENT_URL}/models`, {
-      // Deployment config, not per-user data — but it can change when an
-      // operator starts/stops a local model, so don't cache it.
-      cache: "no-store",
-    });
+    const upstream = await fetch(`${AGENT_URL}/models`, { headers, cache: "no-store" });
 
     if (!upstream.ok) {
       return NextResponse.json(
