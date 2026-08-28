@@ -235,7 +235,7 @@ services:
       OPENAI_MODEL: "${CHAT_MODEL:-anthropic/claude-sonnet-4-6}"
       LLM_TIMEOUT: "${LLM_TIMEOUT:-8}"
     volumes:
-      - mcpfinder_keys:/keys:ro
+      - sealfleet_keys:/keys:ro
     # The router requires auth; present the same per-deployment operator key the
     # migrate step seeded (grants pipeline.invoke / agent.invoke, nothing more).
     command:
