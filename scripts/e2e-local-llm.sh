@@ -130,8 +130,20 @@ if [ "$NIM_UP" = 200 ]; then
   else
     no "chat answer mentions the requested cities" "$(echo "$AN" | cut -c1-160)"
   fi
+  # A phrasing that tempts the model into a string where the pipeline wants a
+  # list ("X and Y"). Arguments must be coerced to the schema, or the MCP 400s
+  # and the answer becomes "the request was invalid".
+  R=$(curl -s -m 300 -X POST "$AGENT/ask" -H 'Content-Type: application/json' "${AS_ADMIN[@]}" \
+      -d "{\"question\":\"Compare the weather in Stockholm and Barcelona\",\"model\":\"local/$MODEL\"}")
+  IU=$(echo "$R" | jqp "type(d['inputs_used'].get('cities')).__name__")
+  AN=$(echo "$R" | jqp "d['answer']")
+  if [ "$IU" = "list" ] && echo "$AN" | grep -qE "Stockholm|Barcelona" && ! echo "$AN" | grep -qiE "invalid|could not complete|not available"; then
+    ok "arguments coerced to schema (cities is a list) and answered"
+  else
+    no "arguments coerced to schema" "cities=$IU :: $(echo "$AN" | cut -c1-140)"
+  fi
 else
-  skip "chat on-box" "model not serving"; skip "chat prose answer" "model not serving"
+  skip "chat on-box" "model not serving"; skip "chat prose answer" "model not serving"; skip "argument coercion" "model not serving"
 fi
 
 # --------------------------------------------------------------------------

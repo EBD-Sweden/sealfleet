@@ -371,6 +371,57 @@ async def deploy_pipeline(pipeline_def: dict, identity: dict) -> tuple[bool, str
     return True, ""
 
 
+def coerce_arguments(arguments: dict, input_schema: dict | None) -> dict:
+    """Bend LLM-extracted arguments to the pipeline's declared JSON-schema types.
+
+    Models routinely hand back `"Stockholm, Barcelona"` for an array input or
+    `"27"` for a number. The MCP behind the pipeline then rejects the call with
+    a 400, and the user is told "the request was invalid" for a question that
+    was perfectly clear. Fixing the shape here is deterministic and cheap.
+    """
+    props = (input_schema or {}).get("properties") or {}
+    out: dict = {}
+    for key, value in (arguments or {}).items():
+        want = (props.get(key) or {}).get("type")
+        try:
+            if want == "array" and isinstance(value, str):
+                parts = re.split(r"\s*(?:,|;|\band\b|&|/)\s*", value.strip())
+                value = [x.strip() for x in parts if x.strip()]
+            elif want == "array" and not isinstance(value, list):
+                value = [value]
+            elif want in ("number", "integer") and isinstance(value, str):
+                num = float(value.strip().rstrip("%°CcFf").strip())
+                value = int(num) if want == "integer" or num.is_integer() else num
+            elif want == "boolean" and isinstance(value, str):
+                value = value.strip().lower() in ("true", "yes", "1", "on")
+            elif want == "string" and isinstance(value, (int, float, bool)):
+                value = str(value)
+        except (ValueError, AttributeError):
+            pass  # leave it; the pipeline will report a clear error
+        out[key] = value
+    return out
+
+
+def step_errors(result: dict) -> list[str]:
+    """Human-readable errors from a v2 run whose steps failed.
+
+    The router records a failed step as {"error": ...} in its output and still
+    returns 200, so a run can "succeed" while every step failed.
+    """
+    errs = []
+    for step_id, r in (result.get("results") or {}).items():
+        out = r.get("output") if isinstance(r, dict) else None
+        if isinstance(out, dict) and out.get("error"):
+            detail = out.get("detail") or ""
+            try:  # MCPs return {"detail": "..."} JSON strings; unwrap for the user
+                detail = json.loads(detail).get("detail", detail)
+            except Exception:
+                pass
+            where = f"{r.get('mcp')}.{r.get('tool')}" if r.get("mcp") else step_id
+            errs.append(f"{where}: {detail or out['error']}")
+    return errs
+
+
 async def fetch_pipeline_tools(identity: dict | None = None) -> list[dict]:
     """Tools the agent can call: named pipelines plus v2 pipelines.
 
@@ -503,9 +554,12 @@ async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: 
     Returns (pipeline_name, arguments, reasoning).
     Times out after LLM_TIMEOUT seconds → returns (None, {}, '').
     """
+    def _args(t: dict) -> str:
+        props = t.get("inputSchema", {}).get("properties", {}) or {}
+        return ", ".join(f"{k}: {v.get('type', 'string')}" for k, v in props.items()) or "none"
+
     tools_desc = "\n".join(
-        f"- {t['name']}: {t['description']}"
-        f" (args: {list(t.get('inputSchema', {}).get('properties', {}).keys())})"
+        f"- {t['name']}: {t['description']} (args — {_args(t)})"
         for t in pipeline_tools
     )
     prompt = f"""Available pipeline tools:
@@ -775,11 +829,11 @@ async def ask(req: AskRequest, request: Request):
                 raw_result={}, reasoning=reasoning,
             )
 
-    # 4. Execute pipeline via the API it was listed from
-    pipeline_api = next(
-        (t.get("_api", "named") for t in pipeline_tools if t.get("name") == pipeline_name),
-        "named",
-    )
+    # 4. Execute pipeline via the API it was listed from, with arguments bent
+    #    to its declared input types first.
+    selected_tool = next((t for t in pipeline_tools if t.get("name") == pipeline_name), {})
+    pipeline_api = selected_tool.get("_api", "named")
+    tool_arguments = coerce_arguments(tool_arguments, selected_tool.get("inputSchema"))
     try:
         result = await run_pipeline(pipeline_name, tool_arguments, pipeline_api, identity)
     except Exception as e:
@@ -800,9 +854,17 @@ async def ask(req: AskRequest, request: Request):
         resolved_chain = [f"{s['mcp']}.{s['tool']}" for s in steps]
         raw_result = result.get("final", result)
 
-    answer = await summarize_result(
-        req.question, pipeline_name, raw_result, req.model, llm_headers
-    )
+    failures = step_errors(result) if pipeline_api == "v2" else []
+    if failures:
+        answer = (
+            f"I ran '{pipeline_name}' but it could not complete:\n- "
+            + "\n- ".join(failures)
+        )
+        reasoning += " Pipeline steps reported errors."
+    else:
+        answer = await summarize_result(
+            req.question, pipeline_name, raw_result, req.model, llm_headers
+        )
 
     elapsed = round(time.time() - start, 2)
     reasoning += f" Completed in {elapsed}s."
