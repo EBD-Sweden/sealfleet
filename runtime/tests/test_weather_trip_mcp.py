@@ -85,3 +85,20 @@ def test_rank_cities_ignores_past_days():
 def test_rank_cities_rejects_missing_weather():
     with pytest.raises(HTTPException):
         rank_cities({})
+
+
+def test_score_day_survives_zero_wind_limit():
+    from mcps.weather_trip.main import _score_day
+    windy = _score_day(_day(wind=5.0), 27.0, 0.0)["score"]   # must not raise (was ZeroDivisionError)
+    calm = _score_day(_day(wind=0.0), 27.0, 0.0)["score"]
+    assert calm > windy                                      # any wind exceeds a zero limit
+
+
+def test_rank_cities_rejects_non_positive_wind_limit():
+    import pytest
+    from fastapi import HTTPException
+    from mcps.weather_trip.main import rank_cities
+    weather = {"cities": [{"name": "Oslo", "days": []}]}
+    with pytest.raises(HTTPException) as exc:
+        rank_cities(weather, target_temp_c=27, max_wind_kph=0)
+    assert exc.value.status_code == 400 and "max_wind_kph" in exc.value.detail

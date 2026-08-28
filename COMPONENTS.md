@@ -118,6 +118,9 @@
 
 **Modules:**
 - `mcps/demo_sandbox/` — Deterministic fake-data sandbox for external testers ✅
+  (`/tools` names every accepted argument; `/call` answers a bad argument with 400)
+- `mcps/weather_trip/` — `rank_cities` rejects a non-positive `max_wind_kph`
+  with 400 (was a ZeroDivisionError → 500 when an agent passed 0 as a placeholder) ✅
 
 ---
 
@@ -137,6 +140,14 @@
 - `agent/requirements.txt` — Python dependencies ✅
 - *(the earlier, uncontainerised `core-agent/agent.py` was removed — it read
   different env vars from what k8s set and nothing built it)*
+
+**Platform operations from chat:** a pseudo-tool `__platform__` routes
+"about the platform" requests to an agentic loop (`run_platform_loop`) that
+speaks MCP to the router's own `/mcp` — the same surface external clients use
+— with the logged-in user's identity on every call. Standard OpenAI
+tool-calling; capped at `PLATFORM_MAX_STEPS` (8). Native tool-calling is
+required of the model: the NIM supports it; the Anthropic path in llm-proxy
+does not yet translate `tools`.
 
 **Pipeline authoring from chat:** a pseudo-tool `__create_pipeline__` is offered
 in the same selection call as real pipelines. When chosen, the agent fetches the
@@ -176,11 +187,51 @@ near-JSON before giving up.
   `pipeline`) so callers can render the resolved chain.
 - `DELETE /v2/pipelines/{name}` — remove a runtime-authored pipeline (file +
   registration). Requires `pipeline.deploy`. Shipped examples return 409.
+- `POST /v2/pipelines/deploy` — refuses to shadow a shipped example's name
+  unless the body carries `"replace": true` (409 otherwise), so an agent
+  re-deploying what it just read cannot overwrite an example by accident.
+- `POST /jobs` / `POST /jobs/batch` — now accept **v2** pipelines (previously
+  named/v1 only, so every chat-authored pipeline 404'd as a job). v2 step
+  results map onto `pipeline_job_steps`; a step whose output carries `error`
+  marks the job failed.
 - **Pipeline storage:** seeds ship in the image (`runtime/pipelines/v2`, refreshed
   on rebuild); pipelines authored at runtime are written to `PIPELINES_DATA_DIR`
   (`/data/pipelines` — a named volume in compose, a PVC in k8s) so they survive
   container recreation. Both are loaded; a data-dir pipeline overrides a seed of
   the same name. Unset → seed dir only (dev/tests).
+
+## `runtime/router_mcp.py` — Platform Control Plane as an MCP Server
+**Status:** ✅ Working (unit + E2E + external client verified)
+**Purpose:** `POST /mcp` on the router — MCP over streamable HTTP, JSON-RPC 2.0
+(`initialize`, `ping`, `tools/list`, `tools/call`). Any MCP client — Claude
+Code, Claude Desktop, Cursor, or the built-in chat — can manage the platform:
+register/deploy MCPs, invoke tools, build/run/delete pipelines, submit and
+check jobs, manage credential *metadata* and policy, read audit, scale.
+**Language:** Python (FastAPI router, no MCP SDK dependency)
+
+**Security model — a translator, never a second authorization path.** Every
+tool forwards to the existing REST route over loopback carrying the caller's
+own headers (`X-API-Key` / `Authorization` / `X-McpFinder-*` delegated
+identity). `_authorize_action`, tenant scoping, rate limits and audit run
+exactly as for REST; a 403 from REST surfaces as an `isError` tool result with
+the same message. **No tool returns a secret value** — `credential_use` is
+deliberately absent and listed in `FORBIDDEN_TOOLS`.
+
+**Tools (30):** `platform_status` · `mcp_list/get/tools/register/deploy/deployments`
+· `tool_invoke` · `pipeline_list/get/run/deploy/delete/reload` ·
+`job_create/get/list/cancel` · `credential_list/create/update/delete` ·
+`policy_rules/check/reload` · `audit_events` · `scale_status/up/down` ·
+`registry_export`. `mcp_deploy`/`mcp_deployments` hop to the deploy service
+(`DEPLOY_URL`).
+
+**Configuration:** `MCP_CONTROL_LOOPBACK_URL` (default `http://127.0.0.1:$APP_PORT`),
+`DEPLOY_URL`, `MCP_CONTROL_MAX_TEXT` (result cap, default 60000 chars).
+`GET /mcp` answers 405 (no server-initiated stream).
+
+**Connect Claude Code:**
+```bash
+claude mcp add --transport http sealfleet http://localhost:8040/mcp -H "X-API-Key: <operator key>"
+```
 
 ## `runtime/llm-proxy/` — Single LLM Entry Point
 **Status:** ✅ Working

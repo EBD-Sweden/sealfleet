@@ -112,3 +112,20 @@ async def test_delete_requires_the_deploy_action(monkeypatch, tmp_path, client):
     monkeypatch.setattr(router, "v2_pipelines", {"x": {"name": "x"}})
     r = await client.delete("/v2/pipelines/x", headers={"X-API-Key": "ro"})
     assert r.status_code == 403
+
+
+async def test_deploy_refuses_to_shadow_a_shipped_example_unless_replace(monkeypatch, tmp_path, client):
+    monkeypatch.setenv("PIPELINES_DATA_DIR", str(tmp_path))
+    headers = _qa_auth(monkeypatch)
+    monkeypatch.setattr(router, "v2_pipelines", {})
+    seed = next(iter(_seed_names()))
+    body = {"pipeline": {"name": seed, "version": 2,
+            "steps": [{"id": "s", "mcp": "demo-sandbox-mcp", "tool": "score_fake_vendor"}]}}
+
+    r = await client.post("/v2/pipelines/deploy", json=body, headers=headers)
+    assert r.status_code == 409 and "replace" in r.json()["detail"]
+    assert not (tmp_path / f"{seed}.yaml").exists()
+
+    r = await client.post("/v2/pipelines/deploy", json={**body, "replace": True}, headers=headers)
+    assert r.status_code == 200
+    assert (tmp_path / f"{seed}.yaml").exists()

@@ -53,3 +53,22 @@ def test_step_errors_are_surfaced_from_a_200_run():
     errs = server.step_errors(run)
     assert errs == ["weather-trip-mcp.fetch_cities_weather: 'cities' must be a non-empty list"]
     assert server.step_errors({"results": {"ok": {"output": {"x": 1}}}}) == []
+
+
+# --- MCP → OpenAI tool conversion for the platform loop -------------------
+
+def test_mcp_tools_convert_to_openai_function_tools():
+    mcp_tools = [{"name": "pipeline_run", "description": "Run it",
+                  "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
+                 {"name": "platform_status", "description": "Health"}]
+    out = server._as_openai_tools(mcp_tools)
+    assert [t["type"] for t in out] == ["function", "function"]
+    assert out[0]["function"]["name"] == "pipeline_run"
+    assert out[0]["function"]["parameters"]["required"] == ["name"]
+    # A tool without a schema still gets a valid empty object schema.
+    assert out[1]["function"]["parameters"] == {"type": "object", "properties": {}}
+
+
+def test_platform_pseudo_tool_is_offered_in_selection_prompt():
+    assert server.PLATFORM_TOOL == "__platform__"
+    assert server.CREATE_PIPELINE_TOOL != server.PLATFORM_TOOL

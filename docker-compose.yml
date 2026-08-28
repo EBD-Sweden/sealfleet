@@ -125,6 +125,9 @@ services:
       REQUIRE_AUTH: "true"
       # Where to fetch the portal's JWKS for user-JWT validation.
       PORTAL_URL: "http://portal:3004"
+      # Deploy service, reached by the MCP control server's mcp_deploy /
+      # mcp_deployments tools (POST /mcp).
+      DEPLOY_URL: "http://deploy:8030"
     volumes:
       - sealfleet_keys:/keys:ro
       # Pipelines authored at runtime (chat / POST /v2/pipelines/deploy). Shipped

@@ -300,7 +300,11 @@ def _score_day(day: dict[str, Any], target_temp_c: float, max_wind_kph: float) -
     # Sunshine: 8h+ of sun counts as a full score.
     sun_score = min(1.0, sun / 8.0)
     # Wind: full score at/below the limit, fading to 0 at double the limit.
-    if wind <= max_wind_kph:
+    # A non-positive limit has no meaning (and divides by zero); treat it as
+    # "any wind is too much" rather than crash.
+    if max_wind_kph <= 0:
+        wind_score = 1.0 if wind <= 0 else 0.0
+    elif wind <= max_wind_kph:
         wind_score = 1.0
     else:
         wind_score = max(0.0, 1.0 - (wind - max_wind_kph) / max_wind_kph)
@@ -331,6 +335,12 @@ def rank_cities(
     cities = (weather or {}).get("cities")
     if not cities:
         raise HTTPException(status_code=400, detail="'weather' must contain a 'cities' list")
+    # Callers (including LLM agents) sometimes pass 0 as a placeholder; reject
+    # it with a message the caller can act on instead of scoring nonsense.
+    if not isinstance(max_wind_kph, (int, float)) or max_wind_kph <= 0:
+        raise HTTPException(status_code=400, detail="'max_wind_kph' must be a positive number (kph)")
+    if not isinstance(target_temp_c, (int, float)):
+        raise HTTPException(status_code=400, detail="'target_temp_c' must be a number (°C)")
 
     ranking: list[dict[str, Any]] = []
     for city in cities:

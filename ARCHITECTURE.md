@@ -126,3 +126,11 @@ Organizations can run local registries and selectively federate with a central h
 ---
 
 *Keep this updated as the system evolves. Note breaking changes, migration paths, and rationale for major decisions.*
+
+- **Decision (2026-08-28): the control plane is exposed as an MCP server inside
+  the router (`runtime/router_mcp.py`, `POST /mcp`), not as a separate service.**
+  One auth surface, one audit log, no extra hop; tools are a pure translation
+  onto the REST routes and carry the caller's own credentials, so the MCP layer
+  can never authorize more than REST would. The built-in chat and external MCP
+  clients (Claude Code, Cursor) use the identical surface. The only route
+  withheld is `credential_use`: an LLM must never hold a secret value.

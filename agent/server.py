@@ -37,7 +37,10 @@ LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "150"))
 # cloud-sized limits it returns content=None and every question silently falls
 # back to keyword matching. Give pinned-local requests their own budgets.
 LOCAL_LLM_TIMEOUT = float(os.getenv("LOCAL_LLM_TIMEOUT", "120"))
-LOCAL_LLM_MAX_TOKENS = int(os.getenv("LOCAL_LLM_MAX_TOKENS", "1024"))
+# 2048, not 1024: a reasoning model deliberating over a multi-step platform
+# request ("run X as a job, then check it") can spend >1k tokens thinking
+# before it emits the selection JSON; with a smaller cap it returns nothing.
+LOCAL_LLM_MAX_TOKENS = int(os.getenv("LOCAL_LLM_MAX_TOKENS", "2048"))
 
 # Model-name prefixes the caller pinned deliberately. We cannot know whether the
 # model behind one reasons before answering, so assume it might.
@@ -217,6 +220,11 @@ async def resolve_llm_key(credential_id: str, identity: dict) -> str | None:
 # A pseudo-tool offered alongside real pipelines so the same selection call can
 # route "build me a pipeline that…" without a separate intent classifier.
 CREATE_PIPELINE_TOOL = "__create_pipeline__"
+# Routes platform-management requests to the agentic loop over the router's
+# MCP control server (POST /mcp): list/register/deploy MCPs, jobs, credentials,
+# policy, audit, scale.
+PLATFORM_TOOL = "__platform__"
+PLATFORM_MAX_STEPS = int(os.getenv("PLATFORM_MAX_STEPS", "8"))
 
 
 async def fetch_mcp_tools(identity: dict | None = None) -> list[dict]:
@@ -422,6 +430,156 @@ def step_errors(result: dict) -> list[str]:
     return errs
 
 
+class McpControlClient:
+    """Minimal MCP (streamable HTTP, JSON-RPC 2.0) client for the router's /mcp.
+
+    Speaks the same protocol an external client would, so the built-in chat
+    exercises exactly the surface Claude Code / Cursor use — no private path.
+    """
+
+    def __init__(self, identity: dict):
+        self.headers = {**identity, "Content-Type": "application/json"}
+        self.url = f"{ROUTER_URL}/mcp"
+        self._id = 0
+
+    async def _rpc(self, method: str, params: dict | None = None):
+        self._id += 1
+        msg = {"jsonrpc": "2.0", "id": self._id, "method": method}
+        if params is not None:
+            msg["params"] = params
+        resp = await http.post(self.url, json=msg, headers=self.headers, timeout=600.0)
+        resp.raise_for_status()
+        data = resp.json()
+        if "error" in data:
+            raise RuntimeError(f"MCP {method}: {data['error'].get('message')}")
+        return data["result"]
+
+    async def initialize(self) -> dict:
+        result = await self._rpc("initialize", {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": {"name": "sealfleet-chat", "version": "0.3.0"},
+        })
+        await http.post(self.url, json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                        headers=self.headers)
+        return result
+
+    async def list_tools(self) -> list[dict]:
+        return (await self._rpc("tools/list"))["tools"]
+
+    async def call_tool(self, name: str, arguments: dict) -> tuple[str, bool]:
+        result = await self._rpc("tools/call", {"name": name, "arguments": arguments})
+        text = "\n".join(c.get("text", "") for c in result.get("content", []) if c.get("type") == "text")
+        return text, bool(result.get("isError"))
+
+
+def _as_openai_tools(mcp_tools: list[dict]) -> list[dict]:
+    return [{
+        "type": "function",
+        "function": {"name": t["name"], "description": t.get("description", ""),
+                     "parameters": t.get("inputSchema") or {"type": "object", "properties": {}}},
+    } for t in mcp_tools]
+
+
+async def run_platform_loop(
+    question: str, identity: dict, model: str | None, llm_headers: dict | None
+) -> tuple[str, list[str], list[dict]]:
+    """Let the model operate the platform through the MCP control server.
+
+    Standard tool-calling loop: the model picks a tool, we execute it via
+    tools/call with the user's identity, feed the result back, repeat until
+    it answers or the step cap is hit. Returns (answer, tools_called, steps).
+    """
+    mcp = McpControlClient(identity)
+    await mcp.initialize()
+    tools = _as_openai_tools(await mcp.list_tools())
+
+    selected = model or OPENAI_MODEL
+    generous = needs_generous_budget(selected)
+    messages = [
+        {"role": "system", "content": (
+            "You operate the Sealfleet platform for the user through the tools "
+            "provided. Call tools to find out or change things; do not guess. "
+            "Use only the tools the request needs; never create, deploy, "
+            "reload or delete anything the user did not ask for. If a tool "
+            "returns an error, do not retry it with the same arguments — "
+            "either fix the arguments using what the error says, or stop and "
+            "report the error. When done, answer concisely in plain language "
+            "with the concrete facts you found (names, counts, ids, statuses). "
+            "Never ask for or repeat secret values."
+        )},
+        {"role": "user", "content": question},
+    ]
+    called: list[str] = []
+    steps: list[dict] = []
+    failures: dict[str, int] = {}     # (tool, args) → consecutive failures
+    succeeded_writes: set[str] = set()
+
+    def _key(name: str, args: dict) -> str:
+        return name + ":" + json.dumps(args, sort_keys=True, default=str)
+
+    for _ in range(PLATFORM_MAX_STEPS):
+        resp = await asyncio.wait_for(
+            llm.chat.completions.create(
+                model=selected, messages=messages, tools=tools, tool_choice="auto",
+                temperature=0,
+                max_tokens=LOCAL_LLM_MAX_TOKENS if generous else LLM_MAX_TOKENS * 4,
+                extra_headers=llm_headers or None,
+            ),
+            timeout=LOCAL_LLM_TIMEOUT if generous else LLM_TIMEOUT * 3,
+        )
+        choice = resp.choices[0]
+        msg = choice.message
+        tool_calls = msg.tool_calls or []
+        if not tool_calls:
+            answer = (msg.content or "").strip()
+            if not answer:
+                answer = "I ran the requested platform operations but the model produced no summary."
+            return answer, called, steps
+
+        # Echo the assistant turn (with its tool calls) before the tool results.
+        messages.append({
+            "role": "assistant", "content": msg.content or "",
+            "tool_calls": [{"id": tc.id, "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                           for tc in tool_calls],
+        })
+        for tc in tool_calls:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            key = _key(tc.function.name, args)
+            is_write = not tc.function.name.endswith(("_list", "_get", "_status", "_tools", "_rules", "_events", "_check", "_export"))
+            if key in succeeded_writes:
+                # Identical write already done this turn: answer from what we
+                # have rather than doing it again.
+                text, is_error = "already done in this conversation; do not repeat it", True
+            else:
+                try:
+                    text, is_error = await mcp.call_tool(tc.function.name, args)
+                except Exception as e:
+                    text, is_error = f"error: {e}", True
+            if is_error:
+                failures[key] = failures.get(key, 0) + 1
+                if failures[key] >= 2:
+                    called.append(tc.function.name)
+                    steps.append({"tool": tc.function.name, "arguments": args, "is_error": True,
+                                  "result": text[:2000]})
+                    return (
+                        f"I stopped: '{tc.function.name}' failed twice with the same arguments. "
+                        f"The platform said: {text[:500]}"
+                    ), called, steps
+            elif is_write:
+                succeeded_writes.add(key)
+            called.append(tc.function.name)
+            steps.append({"tool": tc.function.name, "arguments": args, "is_error": is_error,
+                          "result": text[:2000]})
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": text[:12000]})
+
+    return ("I reached the step limit before finishing; here is what was done so far: "
+            + ", ".join(called)), called, steps
+
+
 async def fetch_pipeline_tools(identity: dict | None = None) -> list[dict]:
     """Tools the agent can call: named pipelines plus v2 pipelines.
 
@@ -556,7 +714,13 @@ async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: 
     """
     def _args(t: dict) -> str:
         props = t.get("inputSchema", {}).get("properties", {}) or {}
-        return ", ".join(f"{k}: {v.get('type', 'string')}" for k, v in props.items()) or "none"
+        parts = []
+        for k, v in props.items():
+            spec = f"{k}: {v.get('type', 'string')}"
+            if "default" in v:
+                spec += f" [default {json.dumps(v['default'])}]"
+            parts.append(spec)
+        return ", ".join(parts) or "none"
 
     tools_desc = "\n".join(
         f"- {t['name']}: {t['description']} (args — {_args(t)})"
@@ -567,6 +731,10 @@ async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: 
 - {CREATE_PIPELINE_TOOL}: build and register a NEW pipeline. Choose this only
   when the user asks to create, build, add or define a pipeline or workflow —
   never to answer a question an existing tool already covers.
+- {PLATFORM_TOOL}: manage or inspect the platform itself — which MCP servers
+  are registered, register/deploy an MCP, run something as a background job
+  and check it, list/create credentials, policy rules, audit events, scaling.
+  Choose this for any question ABOUT the platform rather than about data.
 
 User question: "{question}"
 
@@ -574,8 +742,9 @@ Respond with ONLY valid JSON (no markdown):
 {{"tool": "<tool_name>", "arguments": {{"<param>": "<value>"}}}}
 
 Pick the tool whose purpose covers the question's topic. Every argument has a
-default, so never return null because the question omits one — pass only what
-the question states.
+default, so never return null because the question omits one. Include ONLY the
+arguments the question explicitly states; OMIT every other argument so its
+default applies — never invent a number, and never pass 0 as a placeholder.
 Return null ONLY when no tool's purpose relates to the question at all:
 {{"tool": null, "arguments": {{}}}}"""
 
@@ -752,7 +921,23 @@ async def ask(req: AskRequest, request: Request):
         req.question, pipeline_tools, req.model, llm_headers
     )
 
-    # 3a. Authoring request: build the pipeline, register it, then run it so the
+    # 3a. Platform management: agentic loop over the MCP control server, as
+    #     the logged-in user, so every step carries their permissions.
+    if pipeline_name == PLATFORM_TOOL:
+        try:
+            answer, called, steps = await run_platform_loop(
+                req.question, identity, req.model, llm_headers
+            )
+        except Exception as e:
+            raise HTTPException(502, f"Platform operation failed: {e}")
+        return AskResponse(
+            question=req.question, output_type="platform",
+            resolved_chain=[f"mcp:{c}" for c in called], inputs_used={},
+            answer=answer, raw_result={"steps": steps},
+            reasoning=reasoning + f" Platform loop ran {len(called)} tool call(s).",
+        )
+
+    # 3b. Authoring request: build the pipeline, register it, then run it so the
     #     user sees it working rather than just being told it exists.
     if pipeline_name == CREATE_PIPELINE_TOOL:
         mcps = await fetch_mcp_tools(identity)

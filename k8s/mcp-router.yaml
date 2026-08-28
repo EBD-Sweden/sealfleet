@@ -71,6 +71,8 @@ spec:
               value: "anthropic/claude-haiku-4-5"
             - name: PIPELINES_DATA_DIR
               value: "/data/pipelines"
+            - name: DEPLOY_URL
+              value: "http://mcp-deploy:8030"
           readinessProbe:
             httpGet:
               path: /ready

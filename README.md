@@ -148,6 +148,21 @@ secret the user could not reach themselves, and audit records the real person.
 Known providers: openai, anthropic, groq, mistral, together, deepseek,
 openrouter, nvidia, and `custom`.
 
+**Control the platform over MCP.** The router is itself an MCP server at
+`POST /mcp` (JSON-RPC 2.0, streamable HTTP). Point any MCP client at it and it
+can register and deploy MCPs, invoke tools, build/run pipelines, submit jobs,
+manage credential metadata and policy, and read audit — with exactly the
+permissions of the key or user it presents, and never a secret value:
+
+```bash
+claude mcp add --transport http sealfleet http://localhost:8040/mcp -H "X-API-Key: <operator key>"
+claude -p "Using the sealfleet tools, list the registered MCP servers and pipelines."
+```
+
+The built-in chat uses the same server: *"Run weather_trip_planner for Oslo as
+a background job and tell me its status"* runs a tool-calling loop over `/mcp`
+as the logged-in user.
+
 **Build pipelines from the chat.** Ask *"create a pipeline that summarizes an
 invoice and scores the vendor"* and the agent reads the MCP tool catalog
 (`GET /mcp-tools`), authors a v2 pipeline, registers it, and runs it once. The

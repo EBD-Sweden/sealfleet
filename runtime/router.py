@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import httpx
 import yaml
@@ -4467,6 +4467,30 @@ def _pipeline_uses_external_agent(pipeline: NamedPipeline) -> bool:
     return any(manifests.get(stage.mcp) and manifests[stage.mcp].transport == "external_agent" for stage in pipeline.stages)
 
 
+def _v2_uses_external_agent(pipeline_def: dict) -> bool:
+    return any(
+        manifests.get(step.get("mcp")) and manifests[step["mcp"]].transport == "external_agent"
+        for step in pipeline_def.get("steps", [])
+    )
+
+
+def _resolve_job_pipeline(name: str) -> tuple[str, Any]:
+    """Jobs run either engine: ("named", NamedPipeline) or ("v2", dict).
+
+    Background jobs previously only knew named (v1) pipelines, so every v2
+    pipeline — including everything authored from chat — answered 404 here.
+    """
+    if name in named_pipelines:
+        return "named", named_pipelines[name]
+    if name in v2_pipelines:
+        return "v2", v2_pipelines[name]
+    raise HTTPException(404, f"Pipeline '{name}' not found")
+
+
+def _job_pipeline_needs_agent_invoke(kind: str, pipeline: Any) -> bool:
+    return _pipeline_uses_external_agent(pipeline) if kind == "named" else _v2_uses_external_agent(pipeline)
+
+
 def _authorized_actions_for_background(request: Request) -> set[str]:
     """Capture request action grants to replay inside background job execution."""
     if getattr(request.state, "auth_type", "") == "none" or getattr(request.state, "is_admin", False):
@@ -4508,6 +4532,51 @@ def _job_tenant_id(request: Request, requested_tenant_id: str) -> str:
 _running_jobs: dict[str, asyncio.Task] = {}  # job_id → asyncio.Task
 
 
+async def _execute_v2_job(
+    job_id: str, pipeline_def: dict, inputs: dict, tenant_id: str, subject_id: str | None
+) -> None:
+    """Run a v2 pipeline as a background job, recording per-step rows.
+
+    v2 results are a map of step id → {output, duration_ms, mcp, tool}; a
+    failed step carries {"error": ...} in its output and the run still
+    returns normally, so status is derived from the step outputs.
+    """
+    steps = pipeline_def.get("steps", [])
+    for i, step in enumerate(steps):
+        _job_db_write(
+            """INSERT INTO pipeline_job_steps
+               (step_id, job_id, step_name, status, inputs, sequence_order)
+               VALUES (%s, %s, %s, 'queued', %s, %s)""",
+            (f"{job_id}_s{i}", job_id, str(step.get("id", f"step_{i}")), json.dumps({}), i),
+        )
+
+    result = await _run_v2_pipeline(
+        pipeline_def, inputs, tenant_id=tenant_id, subject_id=subject_id or tenant_id,
+    )
+
+    results = result.get("results") or {}
+    has_error = False
+    for i, step in enumerate(steps):
+        r = results.get(str(step.get("id", f"step_{i}"))) or {}
+        output = r.get("output") if isinstance(r, dict) else None
+        error = output.get("error") if isinstance(output, dict) else None
+        if error:
+            has_error = True
+        _job_db_write(
+            """UPDATE pipeline_job_steps
+               SET status=%s, result=%s, error=%s, completed_at=NOW()
+               WHERE step_id=%s""",
+            ("failed" if error else "completed", json.dumps(output, default=str),
+             (str(error) if error else None), f"{job_id}_s{i}"),
+        )
+
+    _job_db_write(
+        "UPDATE pipeline_jobs SET status=%s, result=%s, error=%s, completed_at=NOW() WHERE job_id=%s",
+        ("failed" if has_error else "completed", json.dumps(result, default=str),
+         ("one or more steps failed" if has_error else None), job_id),
+    )
+
+
 async def _execute_job(
     job_id: str,
     pipeline_name: str,
@@ -4525,6 +4594,9 @@ async def _execute_job(
         )
 
         pipeline = named_pipelines.get(pipeline_name)
+        if not pipeline and pipeline_name in v2_pipelines:
+            await _execute_v2_job(job_id, v2_pipelines[pipeline_name], inputs, tenant_id, subject_id)
+            return
         if not pipeline:
             _job_db_write(
                 "UPDATE pipeline_jobs SET status='failed', error=%s, completed_at=NOW() WHERE job_id=%s",
@@ -4671,10 +4743,8 @@ async def create_job(req: CreateJobRequest, request: Request):
     job_id = uuid.uuid4().hex[:16]
     name = req.name or f"{req.pipeline}_{job_id[:8]}"
 
-    if req.pipeline not in named_pipelines:
-        raise HTTPException(404, f"Pipeline '{req.pipeline}' not found")
-    pipeline = named_pipelines[req.pipeline]
-    if _pipeline_uses_external_agent(pipeline):
+    kind, pipeline = _resolve_job_pipeline(req.pipeline)
+    if _job_pipeline_needs_agent_invoke(kind, pipeline):
         _authorize_action(request, "agent.invoke")
     tenant_id = _job_tenant_id(request, req.tenant_id)
     subject_id = get_subject_id(request)
@@ -4788,12 +4858,10 @@ async def cancel_job(job_id: str, request: Request):
 async def create_batch_job(req: BatchJobRequest, request: Request):
     """Create a batch job: one parent + N child jobs."""
     _authorize_action(request, "pipeline.invoke")
-    if req.pipeline not in named_pipelines:
-        raise HTTPException(404, f"Pipeline '{req.pipeline}' not found")
+    kind, pipeline = _resolve_job_pipeline(req.pipeline)
     if not req.items:
         raise HTTPException(400, "items list is empty")
-    pipeline = named_pipelines[req.pipeline]
-    if _pipeline_uses_external_agent(pipeline):
+    if _job_pipeline_needs_agent_invoke(kind, pipeline):
         _authorize_action(request, "agent.invoke")
     tenant_id = _job_tenant_id(request, req.tenant_id)
     subject_id = get_subject_id(request)
@@ -5295,6 +5363,16 @@ async def deploy_v2_pipeline(request: Request):
     # Reject path-traversal / unsafe names before they reach the filesystem.
     if not isinstance(name, str) or not _PIPELINE_NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="pipeline name must match ^[A-Za-z0-9_-]{1,128}$")
+
+    # A deploy under a shipped example's name would shadow it from the data dir
+    # (see _v2_pipeline_dirs). That is occasionally intended — a tenant tuning
+    # an example — but never by accident (an agent re-deploying what it just
+    # read), so it must be asked for explicitly.
+    if (_V2_SEED_DIR / f"{name}.yaml").exists() and not body.get("replace"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{name}' is a shipped example pipeline; pass \"replace\": true to override it",
+        )
 
     v2_dir = _v2_data_dir()
     v2_dir.mkdir(parents=True, exist_ok=True)
@@ -6438,5 +6516,12 @@ def _load_internal_extensions() -> None:
     except Exception as e:  # fail open to pure platform, but say so loudly
         print(f"[router] WARNING: internal extensions failed to load: {e}")
 
+
+# Platform control plane as an MCP server (POST /mcp). A pure translator over
+# the REST routes above — every tool runs with the caller's own headers, so
+# the action gates and audit in this file remain the single authority.
+import router_mcp  # noqa: E402
+
+router_mcp.install(app)
 
 _load_internal_extensions()

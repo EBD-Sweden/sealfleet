@@ -70,6 +70,10 @@ spec:
                   key: ROUTER_RS256_PRIVATE_KEY
             - name: REGISTRY_URL
               value: "http://{{ $registry }}:{{ .Values.registry.port }}"
+            {{- if .Values.deploy.enabled }}
+            - name: DEPLOY_URL
+              value: "http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "deploy") }}:{{ .Values.deploy.port }}"
+            {{- end }}
             - name: REQUIRE_AUTH
               value: {{ .Values.router.requireAuth | quote }}
             - name: AUTH_ALLOW_EPHEMERAL_KEYS

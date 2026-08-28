@@ -223,5 +223,41 @@ c=$(code "$ROUTER/v2/pipelines" 10);                                   [ "$c" = 
 c=$(code "$PORTAL/api/ask" 10);                                        [ "$c" = 401 ] && ok "portal chat behind auth"             || no "portal chat behind auth" "HTTP $c"
 
 # --------------------------------------------------------------------------
+head_ "10. Platform control over MCP (POST /mcp)"
+mrpc() { curl -s -m 120 -X POST "$ROUTER/mcp" -H 'Content-Type: application/json' "${@:2}" -d "$1"; }
+c=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "$ROUTER/mcp" -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
+[ "$c" = 401 ] && ok "MCP endpoint requires auth" || no "MCP endpoint requires auth" "HTTP $c"
+R=$(mrpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' "${AUTH[@]}")
+[ "$(echo "$R" | jqp "d['result']['serverInfo']['name']")" = "sealfleet-platform" ] && ok "initialize handshake" || no "initialize handshake" "$(echo "$R" | cut -c1-160)"
+NT=$(mrpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "${AUTH[@]}" | jqp "len(d['result']['tools'])")
+[ "${NT:-0}" -ge 25 ] && ok "tools/list exposes the control plane ($NT tools)" || no "tools/list" "got ${NT:-none}"
+mrpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' "${AUTH[@]}" | grep -q '"credential_use"' && no "credential_use is never exposed" "present" || ok "credential_use is never exposed"
+R=$(mrpc '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"pipeline_run","arguments":{"name":"weather_trip_planner","inputs":{"cities":["Oslo"]}}}}' "${AUTH[@]}")
+[ "$(echo "$R" | jqp "d['result']['isError']")" = "False" ] && ok "tools/call runs a pipeline" || no "tools/call pipeline_run" "$(echo "$R" | cut -c1-160)"
+R=$(mrpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"credential_list","arguments":{}}}' "${AUTH[@]}")
+echo "$R" | jqp "d['result']['isError'] and 'credential.read' in d['result']['content'][0]['text']" | grep -q True \
+  && ok "REST authorization propagates (operator key denied credential.read)" || no "authz propagation" "$(echo "$R" | cut -c1-160)"
+R=$(mrpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"credential_list","arguments":{}}}' "${AUTH[@]}" "${AS_ADMIN[@]}")
+[ "$(echo "$R" | jqp "d['result']['isError']")" = "False" ] && ok "delegated admin allowed over MCP" || no "delegated admin over MCP" "$(echo "$R" | cut -c1-160)"
+R=$(mrpc '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"mcp_deployments","arguments":{}}}' "${AUTH[@]}")
+[ "$(echo "$R" | jqp "d['result']['isError']")" = "False" ] && ok "deploy-service hop reachable" || no "deploy-service hop" "$(echo "$R" | cut -c1-160)"
+
+head_ "11. Chat operates the platform through MCP (on-box model)"
+if [ "$NIM_UP" = 200 ]; then
+  R=$(curl -s -m 600 -X POST "$AGENT/ask" -H 'Content-Type: application/json' "${AS_ADMIN[@]}" \
+      -d "{\"question\":\"Which MCP servers are registered on the platform, and how many pipelines exist? Give names.\",\"model\":\"local/$MODEL\"}")
+  [ "$(echo "$R" | jqp "d['output_type']")" = "platform" ] && ok "platform question routed to the MCP loop" || no "platform routing" "$(echo "$R" | cut -c1-200)"
+  echo "$R" | jqp "','.join(d['resolved_chain'])" | grep -q "mcp:mcp_list" && ok "chat called mcp_list over MCP" || no "chat used mcp_list" "$(echo "$R" | jqp "d['resolved_chain']")"
+  AN=$(echo "$R" | jqp "d['answer']")
+  echo "$AN" | grep -q "weather-trip-mcp" && echo "$AN" | grep -q "demo-sandbox-mcp" && ok "answer names the real MCPs" || no "answer names MCPs" "$(echo "$AN" | cut -c1-160)"
+  R=$(curl -s -m 600 -X POST "$AGENT/ask" -H 'Content-Type: application/json' "${AS_ADMIN[@]}" \
+      -d "{\"question\":\"Run the weather_trip_planner pipeline for Oslo as a background job, then check the job and tell me its status and id.\",\"model\":\"local/$MODEL\"}")
+  CH=$(echo "$R" | jqp "','.join(d['resolved_chain'])")
+  echo "$CH" | grep -q "mcp:job_create" && echo "$CH" | grep -qE "mcp:job_(get|list)" && ok "chat ran a job and checked it ($CH)" || no "job lifecycle via chat" "chain=$CH :: $(echo "$R" | jqp "d['answer']" | cut -c1-140)"
+else
+  skip "chat platform loop" "model not serving"
+fi
+
+# --------------------------------------------------------------------------
 printf '\n\033[1mResult: %d passed, %d failed, %d skipped\033[0m\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ]

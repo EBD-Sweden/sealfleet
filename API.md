@@ -460,3 +460,14 @@ def log_audit_event(
 ---
 
 *Update this file as you implement APIs. Document parameters, return types, error conditions, and examples.*
+
+## MCP control server — `POST /mcp`
+
+MCP over streamable HTTP (JSON-RPC 2.0). Methods: `initialize`, `ping`,
+`tools/list`, `tools/call`, `notifications/*` (202, no body). Batch arrays
+accepted. `GET /mcp` → 405. Authentication is the router's normal API-key /
+portal-JWT middleware; each tool forwards to the corresponding REST route with
+the caller's headers, so action gates (`pipeline.deploy`, `credential.read`,
+`mcp.server.register`, …) and audit apply unchanged. A REST 4xx/5xx becomes a
+tool result with `isError: true` and the route's message. No tool returns a
+credential value. Tool catalogue: see `runtime/router_mcp.py` (`TOOLS`).
