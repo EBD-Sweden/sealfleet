@@ -5058,8 +5058,84 @@ def _v2_pipeline_dirs() -> list[Path]:
     return [_V2_SEED_DIR] if data == _V2_SEED_DIR else [_V2_SEED_DIR, data]
 
 
+def _db_load_v2_pipelines() -> dict[str, dict]:
+    """Runtime-authored pipelines from the database (store of record when a
+    database is configured). Empty when there is no DB or no table yet."""
+    conn = _get_db()
+    if not conn:
+        return {}
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name, definition FROM pipelines_v2 ORDER BY name")
+        rows = cur.fetchall()
+        cur.close()
+    except Exception as e:
+        # Table may not exist on an older schema; the file dirs still work.
+        print(f"[router] v2 pipeline DB load skipped: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {}
+    out: dict[str, dict] = {}
+    for name, definition in rows:
+        data = definition if isinstance(definition, dict) else json.loads(definition)
+        if isinstance(data, dict) and not _validate_v2_pipeline(data):
+            out[str(name)] = data
+    return out
+
+
+def _db_upsert_v2_pipeline(data: dict, *, tenant_id: str = "", created_by: str = "") -> bool:
+    conn = _get_db()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO pipelines_v2 (name, definition, tenant_id, created_by)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (name) DO UPDATE
+                 SET definition = EXCLUDED.definition, updated_at = NOW()""",
+            (data["name"], json.dumps(data, default=str), tenant_id or None, created_by or None),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[router] v2 pipeline DB upsert failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def _db_delete_v2_pipeline(name: str) -> bool:
+    conn = _get_db()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM pipelines_v2 WHERE name = %s", (name,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return deleted
+    except Exception as e:
+        print(f"[router] v2 pipeline DB delete failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def _load_yaml_pipeline_v2():
-    """Load YAML pipeline definitions from the seed dir, then the data dir."""
+    """Load v2 pipelines: seed dir, then data dir, then the database.
+
+    Later sources override earlier ones of the same name, so a runtime-authored
+    pipeline in the DB wins over a file, which wins over a shipped example.
+    """
     files: list[Path] = []
     for d in _v2_pipeline_dirs():
         if d.exists():
@@ -5079,6 +5155,11 @@ def _load_yaml_pipeline_v2():
             print(f"[router] loaded v2 pipeline: {data['name']} from {yaml_file}")
         except Exception as e:
             print(f"[router] WARN: failed to load v2 pipeline {yaml_file}: {e}")
+    db_defs = _db_load_v2_pipelines()
+    for name, data in db_defs.items():
+        v2_pipelines[name] = data
+        count += 1
+        print(f"[router] loaded v2 pipeline: {name} from database")
     print(f"[router] loaded {count} v2 pipelines")
 
 
@@ -5374,18 +5455,26 @@ async def deploy_v2_pipeline(request: Request):
             detail=f"'{name}' is a shipped example pipeline; pass \"replace\": true to override it",
         )
 
-    v2_dir = _v2_data_dir()
-    v2_dir.mkdir(parents=True, exist_ok=True)
-    dest = (v2_dir / f"{name}.yaml").resolve()
-    # Defense in depth: the resolved path must stay inside the pipelines dir.
-    if dest.parent != v2_dir:
-        raise HTTPException(status_code=400, detail="invalid pipeline name")
-    dest.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+    stored_in_db = _db_upsert_v2_pipeline(
+        data, tenant_id=get_tenant_id(request), created_by=str(get_subject_id(request) or ""),
+    )
+    location: str
+    if stored_in_db:
+        location = "database"
+    else:
+        v2_dir = _v2_data_dir()
+        v2_dir.mkdir(parents=True, exist_ok=True)
+        dest = (v2_dir / f"{name}.yaml").resolve()
+        # Defense in depth: the resolved path must stay inside the pipelines dir.
+        if dest.parent != v2_dir:
+            raise HTTPException(status_code=400, detail="invalid pipeline name")
+        dest.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+        location = str(dest)
 
     # Register in memory
     v2_pipelines[name] = data
 
-    return {"status": "deployed", "name": name, "path": str(dest)}
+    return {"status": "deployed", "name": name, "path": location, "store": "database" if stored_in_db else "file"}
 
 
 @app.delete("/v2/pipelines/{name}", status_code=204)
@@ -5405,12 +5494,16 @@ async def delete_v2_pipeline(name: str, request: Request):
 
     data_dir = _v2_data_dir()
     path = (data_dir / f"{name}.yaml").resolve()
-    if path.parent != data_dir or not path.exists():
+    removed_file = False
+    if path.parent == data_dir and path.exists():
+        path.unlink()
+        removed_file = True
+    removed_row = _db_delete_v2_pipeline(name)
+    if not removed_file and not removed_row:
         raise HTTPException(
             status_code=409,
             detail=f"'{name}' is a shipped example pipeline and cannot be deleted",
         )
-    path.unlink()
     v2_pipelines.pop(name, None)
     return Response(status_code=204)
 

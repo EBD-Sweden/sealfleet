@@ -32,7 +32,7 @@ read -r ADMIN_ID ADMIN_TENANT <<<"$(docker compose exec -T db psql -U admin -d m
 [ -n "${ADMIN_ID:-}" ] || { echo "no active platform admin found"; exit 1; }
 
 AUTH=(-H "X-API-Key: $API_KEY")
-AS_ADMIN=(-H "X-McpFinder-User-Id: $ADMIN_ID" -H "X-McpFinder-Tenant-Id: $ADMIN_TENANT")
+AS_ADMIN=(-H "X-API-Key: $API_KEY" -H "X-McpFinder-User-Id: $ADMIN_ID" -H "X-McpFinder-Tenant-Id: $ADMIN_TENANT")
 
 jqp() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)" 2>/dev/null; }
 code() { curl -s -o /dev/null -w '%{http_code}' -m "${2:-10}" "${@:3}" "$1"; }
@@ -48,11 +48,14 @@ c=$(code "$PORTAL"); [ "$c" = 200 ] && ok "portal serving" || no "portal serving
 
 # --------------------------------------------------------------------------
 head_ "2. LLM proxy configuration"
-H=$(curl -s -m 10 "$PROXY/health")
+PROXY_AUTH=(-H "Authorization: Bearer $API_KEY")
+H=$(curl -s -m 10 "${PROXY_AUTH[@]}" "$PROXY/health")
 [ "$(echo "$H" | jqp "d['local']['enabled']")" = "True" ] \
   && ok "local backend enabled" || no "local backend enabled" "$H"
 [ -n "$(echo "$H" | jqp "','.join(d['byo']['providers'])")" ] \
   && ok "BYO providers advertised" || no "BYO providers advertised" "$H"
+c=$(code "$PROXY/v1/chat/completions" 10 -X POST -H 'Content-Type: application/json' -d '{"model":"local/x","messages":[]}')
+[ "$c" = 401 ] && ok "proxy rejects callers without the token" || no "proxy token gate" "HTTP $c"
 
 NIM_UP=$(code "$NIM/v1/models" 5)
 [ "$NIM_UP" = 200 ] && ok "on-box model serving" || skip "on-box model serving" "HTTP $NIM_UP"
@@ -61,7 +64,7 @@ NIM_UP=$(code "$NIM/v1/models" 5)
 head_ "3. Local model inference"
 if [ "$NIM_UP" = 200 ]; then
   MODEL=$(curl -s -m 10 "$NIM/v1/models" | jqp "d['data'][0]['id']")
-  R=$(curl -s -m 180 -X POST "$PROXY/v1/chat/completions" -H 'Content-Type: application/json' \
+  R=$(curl -s -m 180 -X POST "$PROXY/v1/chat/completions" -H 'Content-Type: application/json' "${PROXY_AUTH[@]}" \
       -d "{\"model\":\"local/$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: ok\"}],\"max_tokens\":400,\"temperature\":0}")
   C=$(echo "$R" | jqp "d['choices'][0]['message']['content'] or ''")
   [ -n "$C" ] && ok "pinned local completion (content: $(echo "$C" | tr -d '\n' | cut -c1-30))" \
@@ -73,7 +76,7 @@ else
 fi
 
 # The safety property: a pinned local request must never reach a cloud backend.
-R=$(curl -s -m 30 -X POST "$PROXY/v1/chat/completions" -H 'Content-Type: application/json' \
+R=$(curl -s -m 30 -X POST "$PROXY/v1/chat/completions" -H 'Content-Type: application/json' "${PROXY_AUTH[@]}" \
     -d '{"model":"local/definitely-not-a-real-model","messages":[{"role":"user","content":"hi"}],"max_tokens":10}')
 echo "$R" | grep -qi "local llm" \
   && ok "pinned local fails closed (no cloud fallback)" \
@@ -197,7 +200,7 @@ if [ -n "$CID" ]; then
   echo "$MD" | grep -q "$CID" && ok "BYO provider offered as a brain" || no "BYO brain discovery" "$MD"
 
   # The agent's own key is denied credential.* — no identity must reveal nothing.
-  MD0=$(curl -s -m 20 "$AGENT/models")
+  MD0=$(curl -s -m 20 "${AUTH[@]}" "$AGENT/models")
   echo "$MD0" | grep -q "$CID" && no "BYO hidden without identity" "leaked" \
                                || ok "BYO hidden without identity"
 
@@ -221,6 +224,8 @@ c=$(code "$ROUTER/credentials" 10 "${AUTH[@]}" -H "X-McpFinder-User-Id: 11111111
 [ "$c" = 403 ] && ok "forged user id denied" || no "forged user id denied" "HTTP $c"
 c=$(code "$ROUTER/v2/pipelines" 10);                                   [ "$c" = 401 ] && ok "unauthenticated router call rejected" || no "unauthenticated rejected" "HTTP $c"
 c=$(code "$PORTAL/api/ask" 10);                                        [ "$c" = 401 ] && ok "portal chat behind auth"             || no "portal chat behind auth" "HTTP $c"
+c=$(code "$AGENT/models" 10);                                          [ "$c" = 401 ] && ok "agent rejects callers without the key"  || no "agent rejects unauth callers" "HTTP $c"
+c=$(code "$AGENT/ask" 10 -X POST -H 'Content-Type: application/json' -H "X-McpFinder-User-Id: $ADMIN_ID" -d '{"question":"x"}'); [ "$c" = 401 ] && ok "agent ignores identity headers without the key" || no "agent identity spoof blocked" "HTTP $c"
 
 # --------------------------------------------------------------------------
 head_ "10. Platform control over MCP (POST /mcp)"

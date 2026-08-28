@@ -35,10 +35,55 @@ services, not schema):
 # from a machine with psql + this repo checked out
 export DATABASE_URL='postgresql://…neon.tech/sealfleet?sslmode=require'
 for f in db/migrations/*.sql; do psql "$DATABASE_URL" -f "$f"; done
-psql "$DATABASE_URL" -f scripts/001_create_api_keys.sql   # optional: seed an operator key
+psql "$DATABASE_URL" -f scripts/001_create_api_keys.sql
 ```
 
-`terraform output` gives the portal/router URLs. If you left `portal_public_url`
+Migrations are idempotent; re-run the loop after every upgrade. 0.8.0 adds
+`018_aws_marketplace_concurrent_agreements`, `019_credentials` (the
+credential store — previously missing entirely) and `020_pipelines_v2`
+(runtime-authored pipelines, which on Cloud Run must live in the database).
+
+### Register the runtime API key (required for the chat)
+
+The portal, the chat agent and the llm-proxy share one operator key
+(`runtime_api_key`; generated when you don't set it). The router only accepts
+it once it is in `api_keys`, and the chat needs `allow_identity_delegation`
+so its calls are attributed to the real user:
+
+```bash
+KEY=$(terraform output -raw runtime_api_key)
+psql "$DATABASE_URL" -c "INSERT INTO api_keys
+  (api_key, tenant_id, name, is_active, action_permissions, allow_identity_delegation)
+  VALUES ('$KEY', 'hosted', 'Hosted portal/agent key', true,
+          ARRAY['pipeline.invoke','agent.invoke','agent.register','mcp.server.register','registry.export','registry.import'],
+          true)
+  ON CONFLICT (api_key) DO UPDATE SET is_active = true,
+    action_permissions = EXCLUDED.action_permissions,
+    allow_identity_delegation = EXCLUDED.allow_identity_delegation;"
+```
+
+This key deliberately excludes `credential.*` — the chat resolves a tenant's
+own LLM credentials as the logged-in user, never as the service.
+
+### Images
+
+Build and push all five services (the chat adds `agent` and
+`runtime/llm-proxy`):
+
+```bash
+PUSH=1 TAG=0.8.0 scripts/build-hosted-images.sh runtime registry portal agent runtime/llm-proxy
+```
+
+### Chat brains on hosted
+
+There is no on-box model on Cloud Run. Set `anthropic_api_key` for a
+platform-level default brain (`chat_model`, default
+`anthropic/claude-sonnet-4-6`), and/or let tenants bring their own: a
+credential scoped `llm:anthropic`, `llm:openai`, … appears in their chat's
+brain picker and is unwrapped as that user. The platform's control plane is
+also an MCP server at `<router_url>/mcp` (see COMPONENTS.md).
+
+`terraform output` gives the portal/router/agent/llm-proxy URLs. If you left `portal_public_url`
 empty, set it to the portal URL (or your custom domain) and re-apply so
 `NEXTAUTH_URL` is correct, then map the domain:
 

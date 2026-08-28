@@ -205,7 +205,8 @@ def _loopback_url() -> str:
 
 
 def _deploy_url() -> str:
-    return os.environ.get("DEPLOY_URL", "http://localhost:8030").rstrip("/")
+    """Empty when no deploy service is configured (e.g. hosted Cloud Run)."""
+    return os.environ.get("DEPLOY_URL", "").rstrip("/")
 
 
 _transport_factory: Callable[[], httpx.AsyncBaseTransport | None] = lambda: None
@@ -222,6 +223,9 @@ def _caller_headers(request: Request) -> dict:
 
 
 async def _forward(request: Request, tool: dict, args: dict) -> tuple[int, Any]:
+    if tool["service"] == "deploy" and not _deploy_url():
+        return 503, {"error": "The deploy service is not configured in this deployment "
+                              "(DEPLOY_URL unset). Register an already-running MCP with mcp_register instead."}
     base = _deploy_url() if tool["service"] == "deploy" else _loopback_url()
     url = base + _path(tool["path"], args)
     headers = _caller_headers(request)

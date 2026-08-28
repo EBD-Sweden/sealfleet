@@ -163,6 +163,12 @@ near-JSON before giving up.
 - `ROUTER_URL` — runtime router (default `http://localhost:8040`)
 - `ROUTER_API_KEY` — operator key sent as `X-API-Key`; required when the router
   runs with `REQUIRE_AUTH=true`. Compose injects `/keys/runtime-api-key`.
+- `AGENT_API_KEY` (default = `ROUTER_API_KEY`) — key callers of *this* service
+  must present. `/ask` trusts `X-McpFinder-*` identity headers and forwards them
+  under the agent's delegation-enabled key, so an unauthenticated `/ask` would
+  let anyone act as any user. The portal forwards its `X-API-Key`.
+- `OPENAI_API_KEY` — sent to the llm-proxy as the bearer token
+  (= `LLM_PROXY_TOKEN`).
 - `OPENAI_BASE_URL` — the llm-proxy (default `http://localhost:3456/v1`)
 - `OPENAI_MODEL` — model to plan with. Prefix `local/` to pin the on-box model.
 
@@ -195,10 +201,12 @@ near-JSON before giving up.
   results map onto `pipeline_job_steps`; a step whose output carries `error`
   marks the job failed.
 - **Pipeline storage:** seeds ship in the image (`runtime/pipelines/v2`, refreshed
-  on rebuild); pipelines authored at runtime are written to `PIPELINES_DATA_DIR`
-  (`/data/pipelines` — a named volume in compose, a PVC in k8s) so they survive
-  container recreation. Both are loaded; a data-dir pipeline overrides a seed of
-  the same name. Unset → seed dir only (dev/tests).
+  on rebuild). Pipelines authored at runtime go to the **database**
+  (`pipelines_v2`, migration 020) when one is configured — the store of record,
+  shared by every replica and safe on ephemeral filesystems (Cloud Run). Without
+  a database they fall back to `PIPELINES_DATA_DIR` (`/data/pipelines`; a named
+  volume in compose, a PVC in k8s). Load order seeds → data dir → DB, later
+  winning. `DELETE` removes the row and/or file; shipped examples stay 409.
 
 ## `runtime/router_mcp.py` — Platform Control Plane as an MCP Server
 **Status:** ✅ Working (unit + E2E + external client verified)
@@ -248,6 +256,14 @@ without any MCP or agent knowing the difference.
 - `local/<model>` — **pinned** to `LOCAL_LLM_BASE_URL`. Never falls back to a
   cloud backend, so the request provably cannot leave the host. This is the
   guarantee regulated tenants (banks, health) need.
+- **Tool calling on the Anthropic path:** the Messages translation now carries
+  OpenAI `tools`/`tool_choice` → Anthropic `tools`/`input_schema`, assistant
+  `tool_calls` → `tool_use` blocks, `role:"tool"` results → `tool_result`
+  blocks (consecutive results folded into one user turn, as Anthropic
+  requires), and `tool_use` responses → `tool_calls` with
+  `finish_reason: "tool_calls"`. So the chat's platform loop works on a
+  tenant's Anthropic subscription, not only on OpenAI-compatible servers.
+  Pure-function tests: `runtime/llm-proxy/test/` (`node --test`).
 - `byo/<provider>/<model>` — **pinned** to the tenant's own provider. Also has
   no fallback: a tenant that chose its own account must not be silently served
   by the platform's backend. The key arrives per request in the
@@ -264,6 +280,12 @@ without any MCP or agent knowing the difference.
 5. 503
 
 **Configuration:**
+- `LLM_PROXY_TOKEN` — shared secret callers must present as their OpenAI
+  `api_key` (`Authorization: Bearer`). Compose sets it to the per-deployment
+  operator key; hosted sets it from Secret Manager. Unset = open (dev only —
+  an open proxy on a public ingress lets strangers spend the provider keys).
+  `/health` stays public for probes but shows backend config only to callers
+  with the token.
 - `LOCAL_LLM_BASE_URL` — any OpenAI-compatible server (NVIDIA NIM, vLLM,
   llama.cpp, Ollama). Empty disables the local route.
 - `LOCAL_LLM_MODEL` — served model name used when the `local/` prefix carries none

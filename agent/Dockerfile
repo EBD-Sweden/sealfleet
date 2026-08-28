@@ -10,4 +10,5 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser \
     && chown -R appuser /app
 USER appuser
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8050"]
+# Cloud Run injects PORT; default stays 8050 for compose/k8s.
+CMD ["sh", "-c", "exec uvicorn server:app --host 0.0.0.0 --port ${PORT:-8050}"]

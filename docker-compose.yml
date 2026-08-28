@@ -199,9 +199,8 @@ services:
     image: node:22-alpine
     restart: unless-stopped
     working_dir: /app
-    volumes:
-      - ./runtime/llm-proxy:/app:ro
-    command: ["node", "index.js"]
+    depends_on:
+      keygen: {condition: service_completed_successfully}
     environment:
       LLM_PROXY_PORT: "3456"
       # Local on-box model (see the `local-llm` profile below, or point at your
@@ -213,6 +212,17 @@ services:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       AI_GATEWAY_API_KEY: "${AI_GATEWAY_API_KEY:-}"
       CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"
+    volumes:
+      - ./runtime/llm-proxy:/app:ro
+      - sealfleet_keys:/keys:ro
+    # Callers must present the per-deployment operator key as their api_key;
+    # the same value the agent sends as OPENAI_API_KEY.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export LLM_PROXY_TOKEN="$$(cat /keys/runtime-api-key)"
+        exec node index.js
     ports: ["3456:3456"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3456/health >/dev/null || exit 1"]
@@ -243,6 +253,7 @@ services:
       - -c
       - |
         export ROUTER_API_KEY="$$(cat /keys/runtime-api-key)"
+        export OPENAI_API_KEY="$$ROUTER_API_KEY"
         exec uvicorn server:app --host 0.0.0.0 --port 8050
     ports: ["8050:8050"]
     healthcheck:

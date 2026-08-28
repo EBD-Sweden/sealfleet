@@ -38,7 +38,8 @@ const http = require("http");
 const https = require("https");
 const url = require("url");
 
-const PORT = parseInt(process.env.LLM_PROXY_PORT || "3456", 10);
+// Cloud Run and similar inject PORT; LLM_PROXY_PORT is the explicit override.
+const PORT = parseInt(process.env.PORT || process.env.LLM_PROXY_PORT || "3456", 10);
 const ANTHROPIC_OAUTH_TOKEN = process.env.ANTHROPIC_OAUTH_TOKEN || "";
 const CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN || "";
 const CLAUDE_CODE_CREDENTIALS_PATH = process.env.CLAUDE_CODE_CREDENTIALS_PATH || path.join(os.homedir(), ".claude", ".credentials.json");
@@ -52,6 +53,21 @@ const LOCAL_LLM_BASE_URL = (process.env.LOCAL_LLM_BASE_URL || "").replace(/\/$/,
 const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || "";
 const LOCAL_LLM_TIMEOUT_MS = parseInt(process.env.LOCAL_LLM_TIMEOUT_MS || "300000", 10);
 const LOCAL_PREFIX = "local/";
+
+// Shared secret callers must present (Authorization: Bearer <token>, which is
+// what an OpenAI client sends as its api_key). Unset = open, for local dev
+// only: an open proxy on a public ingress lets strangers spend the platform's
+// provider keys.
+const LLM_PROXY_TOKEN = process.env.LLM_PROXY_TOKEN || "";
+
+function callerAuthorized(req) {
+  if (!LLM_PROXY_TOKEN) return true;
+  const h = req.headers["authorization"] || "";
+  const presented = h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : (req.headers["x-api-key"] || "");
+  if (!presented || presented.length !== LLM_PROXY_TOKEN.length) return false;
+  const crypto = require("crypto");
+  return crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(LLM_PROXY_TOKEN));
+}
 
 // Bring-your-own provider: "byo/<provider>/<model>". The caller supplies the
 // key per request (resolved from the platform credential store upstream) —
@@ -118,26 +134,114 @@ function getBackendMode() {
   return "no-backend";
 }
 
+/**
+ * Convert an OpenAI-style message list → Anthropic messages.
+ *
+ * Tool calling differs structurally: OpenAI puts calls on the assistant
+ * message (`tool_calls`) and results in `role:"tool"` messages; Anthropic puts
+ * both inside content blocks (`tool_use` on the assistant turn, `tool_result`
+ * on the following user turn). Consecutive tool results are folded into ONE
+ * user turn, which Anthropic requires.
+ */
+function toAnthropicMessages(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (m.role === "system") continue;
+
+    if (m.role === "tool") {
+      const block = {
+        type: "tool_result",
+        tool_use_id: m.tool_call_id,
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
+      };
+      const last = out[out.length - 1];
+      if (last && last.role === "user" && Array.isArray(last.content) && last.content.some((b) => b.type === "tool_result")) {
+        last.content.push(block);
+      } else {
+        out.push({ role: "user", content: [block] });
+      }
+      continue;
+    }
+
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const content = [];
+      if (m.content) content.push({ type: "text", text: String(m.content) });
+      for (const tc of m.tool_calls) {
+        let input = {};
+        try { input = JSON.parse(tc.function?.arguments || "{}"); } catch { input = {}; }
+        content.push({ type: "tool_use", id: tc.id, name: tc.function?.name, input });
+      }
+      out.push({ role: "assistant", content });
+      continue;
+    }
+
+    out.push({ role: m.role, content: m.content ?? "" });
+  }
+  return out;
+}
+
+/** OpenAI `tools` (function schema) → Anthropic `tools` (input_schema). */
+function toAnthropicTools(openAiTools) {
+  return (openAiTools || [])
+    .filter((t) => t && t.type === "function" && t.function?.name)
+    .map((t) => ({
+      name: t.function.name,
+      description: t.function.description || "",
+      input_schema: t.function.parameters || { type: "object", properties: {} },
+    }));
+}
+
+function toAnthropicToolChoice(choice) {
+  if (!choice || choice === "auto") return undefined;
+  if (choice === "none") return undefined; // handled by omitting tools
+  if (choice === "required") return { type: "any" };
+  if (typeof choice === "object" && choice.function?.name) return { type: "tool", name: choice.function.name };
+  return undefined;
+}
+
 /** Convert OpenAI chat completion request → Anthropic Messages API request */
 function toAnthropicBody(openAiBody) {
   const model = resolveAnthropicModel(openAiBody.model);
   const maxTokens = openAiBody.max_tokens || 4096;
-  const messages = (openAiBody.messages || []).filter((m) => m.role !== "system");
   const system = (openAiBody.messages || [])
     .filter((m) => m.role === "system")
-    .map((m) => m.content)
+    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
     .join("\n");
-  return {
+  const body = {
     model,
     max_tokens: maxTokens,
     ...(system ? { system } : {}),
-    messages,
+    messages: toAnthropicMessages(openAiBody.messages || []),
   };
+  if (typeof openAiBody.temperature === "number") body.temperature = openAiBody.temperature;
+
+  const tools = openAiBody.tool_choice === "none" ? [] : toAnthropicTools(openAiBody.tools);
+  if (tools.length) {
+    body.tools = tools;
+    const tc = toAnthropicToolChoice(openAiBody.tool_choice);
+    if (tc) body.tool_choice = tc;
+  }
+  return body;
 }
 
 /** Convert Anthropic Messages response → OpenAI chat completion response */
 function toOpenAiResponse(anthropicResp, originalModel) {
-  const content = anthropicResp.content?.[0]?.text || "";
+  const blocks = Array.isArray(anthropicResp.content) ? anthropicResp.content : [];
+  const text = blocks.filter((b) => b.type === "text").map((b) => b.text || "").join("");
+  const toolCalls = blocks
+    .filter((b) => b.type === "tool_use")
+    .map((b) => ({
+      id: b.id,
+      type: "function",
+      function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+    }));
+
+  const message = { role: "assistant", content: text || (toolCalls.length ? null : "") };
+  if (toolCalls.length) message.tool_calls = toolCalls;
+
+  const finishMap = { end_turn: "stop", stop_sequence: "stop", max_tokens: "length", tool_use: "tool_calls" };
+  const finish_reason = toolCalls.length ? "tool_calls" : (finishMap[anthropicResp.stop_reason] || "stop");
+
   return {
     id: anthropicResp.id || `proxy-${Date.now()}`,
     object: "chat.completion",
@@ -146,8 +250,8 @@ function toOpenAiResponse(anthropicResp, originalModel) {
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content },
-        finish_reason: anthropicResp.stop_reason || "stop",
+        message,
+        finish_reason,
       },
     ],
     usage: {
@@ -396,15 +500,21 @@ const server = http.createServer((req, res) => {
       service: "llm-proxy",
       mode: getBackendMode(),
       port: PORT,
-      local: LOCAL_LLM_BASE_URL
-        ? { enabled: true, base_url: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL }
-        : { enabled: false },
-      byo: { providers: Object.keys(BYO_PROVIDERS).concat("anthropic").sort() },
+      auth: LLM_PROXY_TOKEN ? "token" : "open",
+      ...(callerAuthorized(req) ? {
+        local: LOCAL_LLM_BASE_URL
+          ? { enabled: true, base_url: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL }
+          : { enabled: false },
+        byo: { providers: Object.keys(BYO_PROVIDERS).concat("anthropic").sort() },
+      } : {}),
     });
   }
 
   if (!req.url.includes("chat/completions")) {
     return sendJson(404, { error: { message: `Not found: ${req.url}` } });
+  }
+  if (!callerAuthorized(req)) {
+    return sendJson(401, { error: { message: "Unauthorized: set LLM_PROXY_TOKEN as the client api_key" } });
   }
 
   const chunks = [];
@@ -463,6 +573,10 @@ const server = http.createServer((req, res) => {
       }
     }
 
+    // Every failed route records why, so the final error is truthful rather
+    // than "no backend configured" when backends exist but all refused.
+    let lastError = null;
+
     // Route 1: Claude CLI / Anthropic OAuth (preferred)
     const oauthToken = getAnthropicOauthToken();
     if (oauthToken) {
@@ -471,6 +585,7 @@ const server = http.createServer((req, res) => {
         console.log(`[llm-proxy] OK via ${getBackendMode()}`);
         return sendJson(200, result);
       } catch (err) {
+        lastError = err;
         console.warn(`[llm-proxy] ${getBackendMode()} failed: ${err.message} — trying next`);
       }
     }
@@ -482,12 +597,12 @@ const server = http.createServer((req, res) => {
         console.log(`[llm-proxy] OK via ai-gateway`);
         return sendJson(200, result);
       } catch (err) {
+        lastError = err;
         console.warn(`[llm-proxy] ai-gateway failed: ${err.message} — trying next`);
       }
     }
 
     // Route 3: Anthropic API key (fallback)
-    let lastError = null;
     if (ANTHROPIC_API_KEY) {
       try {
         const result = await callAnthropicDirect(body, ANTHROPIC_API_KEY, false);
@@ -521,7 +636,9 @@ const server = http.createServer((req, res) => {
   req.on("error", (err) => sendJson(400, { error: { message: err.message } }));
 });
 
-server.listen(PORT, "0.0.0.0", () => {
+module.exports = { toAnthropicBody, toAnthropicMessages, toAnthropicTools, toOpenAiResponse, resolveAnthropicModel, callerAuthorized };
+
+if (require.main === module) server.listen(PORT, "0.0.0.0", () => {
   const mode = getBackendMode();
   console.log(`[llm-proxy] Listening on 0.0.0.0:${PORT}`);
   console.log(`[llm-proxy] Mode: ${mode}`);

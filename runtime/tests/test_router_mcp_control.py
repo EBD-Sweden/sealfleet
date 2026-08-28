@@ -141,3 +141,11 @@ async def test_get_declines_stream_with_405(mcp_client):
 async def test_parse_error(mcp_client):
     r = await mcp_client.post("/mcp", content=b"{not json", headers={"X-API-Key": QA_KEY, "content-type": "application/json"})
     assert r.status_code == 400 and r.json()["error"]["code"] == -32700
+
+
+async def test_deploy_tools_explain_when_no_deploy_service(mcp_client, monkeypatch):
+    monkeypatch.delenv("DEPLOY_URL", raising=False)
+    r = await call(mcp_client, "tools/call", {"name": "mcp_deployments", "arguments": {}})
+    res = r.json()["result"]
+    assert res["isError"] is True
+    assert "DEPLOY_URL" in res["content"][0]["text"]

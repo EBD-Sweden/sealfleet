@@ -11,6 +11,7 @@ Flow (optimised — single LLM call):
 """
 
 import asyncio
+import hmac
 import json
 import os
 import re
@@ -62,6 +63,23 @@ http = httpx.AsyncClient(
     timeout=20.0,
     headers={"X-API-Key": ROUTER_API_KEY} if ROUTER_API_KEY else {},
 )
+
+# Callers of THIS service (the portal) must present the same operator key.
+# /ask trusts X-McpFinder-* identity headers and forwards them to the router
+# under the agent's delegation-enabled key, so an unauthenticated /ask would
+# let anyone act as any user. Unset only for local experiments.
+AGENT_API_KEY = os.getenv("AGENT_API_KEY", ROUTER_API_KEY)
+
+
+def require_agent_key(request: Request) -> None:
+    if not AGENT_API_KEY:
+        return
+    presented = request.headers.get("X-API-Key") or ""
+    auth = request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        presented = presented or auth[7:].strip()
+    if not presented or not hmac.compare_digest(presented, AGENT_API_KEY):
+        raise HTTPException(401, "Unauthorized")
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -827,6 +845,7 @@ async def health():
 
 @app.get("/models")
 async def models(request: Request):
+    require_agent_key(request)
     """Which brains this deployment can plan with, for the portal's chat picker.
 
     Asks the llm-proxy what it has configured rather than guessing, so the list
@@ -875,6 +894,7 @@ async def models(request: Request):
 
 @app.get("/tools")
 async def tools(request: Request):
+    require_agent_key(request)
     try:
         pipeline_tools = await fetch_pipeline_tools(delegated(request))
         return {"tools": pipeline_tools}
@@ -884,6 +904,7 @@ async def tools(request: Request):
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest, request: Request):
+    require_agent_key(request)
     start = time.time()
     identity = delegated(request)
 

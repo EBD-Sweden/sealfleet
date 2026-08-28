@@ -6,6 +6,74 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] — Chat on any brain, platform control over MCP, hosted chat
+
+### Added
+- **Local LLM provider.** The chat can run entirely on-box: `local/<model>`
+  pins a request to `LOCAL_LLM_BASE_URL` (NVIDIA NIM, vLLM, llama.cpp, Ollama)
+  with **no cloud fallback**, so prompts provably never leave the host. Opt-in
+  `local-llm` compose profile runs the NIM. Portal chat gains a brain picker.
+- **Bring-your-own provider.** `byo/<provider>/<model>` runs the chat on the
+  tenant's own account (OpenAI, Anthropic, Groq, Mistral, Together, DeepSeek,
+  OpenRouter, NVIDIA, or a custom OpenAI-compatible endpoint). The key is a
+  normal credential scoped `llm:<provider>[:<model>]`, resolved **as the
+  logged-in user** — the agent's key is denied `credential.*` — and never
+  reaches the browser or a prompt.
+- **Anthropic tool calling.** The llm-proxy's Messages translation now carries
+  `tools`/`tool_choice`, `tool_calls`↔`tool_use`, and `role:"tool"`↔`tool_result`,
+  so everything below works on an Anthropic subscription.
+- **Chat authors pipelines.** "Create a pipeline that summarises an invoice and
+  scores the vendor" reads the MCP tool catalogue (`GET /mcp-tools`), writes a
+  v2 definition (JSON-mode guided decoding, one repair pass), registers it and
+  runs it once. `DELETE /v2/pipelines/{name}` for authored pipelines.
+- **The platform is an MCP server.** `POST /mcp` (JSON-RPC 2.0, streamable
+  HTTP; 30 tools) lets Claude Code, Claude Desktop, Cursor — and the built-in
+  chat — register/deploy MCPs, invoke tools, build/run/delete pipelines,
+  submit jobs, manage credential metadata and policy, read audit, scale. A
+  pure translator over the REST routes: every tool runs with the caller's own
+  credentials, so REST action gates and audit are the only authority; no tool
+  returns a secret value.
+- **Hosted (Cloud Run) chat.** Terraform adds the `agent` and `llm-proxy`
+  services, a `runtime_api_key` secret shared by portal/agent/proxy, optional
+  `anthropic_api_key`, and `chat_model`. Runtime-authored pipelines are stored
+  in the database (`pipelines_v2`), so they survive ephemeral filesystems and
+  are shared by every replica.
+- `scripts/e2e-local-llm.sh`: 52 end-to-end checks against a live stack.
+
+### Fixed
+- No migration ever created the `credentials` table; `/credentials`, the
+  `{{credential:name}}` resolver and the portal Credentials page answered
+  `UndefinedTable` on every deployment built from these migrations.
+- A platform admin acting through a delegating API key (the portal) could not
+  pass `_authorize_action`: the `is_admin` claim never reaches the router that
+  way. Re-checked from the users table, gated on `delegated_from`.
+- `POST /jobs` only knew named (v1) pipelines; every v2 pipeline 404'd as a job.
+- `POST /v2/pipelines/deploy` could silently shadow a shipped example; now 409
+  unless `"replace": true`.
+- Runtime-authored pipelines lived in the router container's writable layer
+  and vanished on rebuild; now database (or `PIPELINES_DATA_DIR` volume/PVC).
+- `weather-trip-mcp` crashed (ZeroDivisionError) on `max_wind_kph: 0`; `demo-sandbox-mcp`
+  listed no argument names and answered bad input with a 500 traceback.
+- The chat: arguments are coerced to the pipeline schema (a string where a
+  list is wanted became "the request was invalid"); failed steps are reported
+  rather than summarised as data; tool selection is deterministic
+  (`temperature=0`); reasoning-model budgets no longer truncate at selection.
+- The router had no `DEPLOY_URL` in compose/k8s/Helm.
+
+### Security
+- The chat agent now requires the operator key from its callers. `/ask`
+  trusts `X-McpFinder-*` identity headers and forwards them under a
+  delegation-enabled key, so an unauthenticated `/ask` on a public ingress
+  would have let anyone act as any user.
+- The llm-proxy requires a bearer token (`LLM_PROXY_TOKEN`); an open proxy on
+  a public ingress would let strangers spend the platform's provider keys.
+- `credential_use` is deliberately not exposed over MCP.
+
+### Migrations
+- `018_aws_marketplace_concurrent_agreements.sql` (from the public tree),
+  `019_credentials.sql`, `020_pipelines_v2.sql`. Hosted operators: apply all
+  three against `database_url`.
+
 ## [0.7.6] — Hide platform-only admin surfaces from customers
 
 ### Fixed

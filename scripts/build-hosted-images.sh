@@ -21,6 +21,8 @@ set -euo pipefail
 TAG="${1:-}"
 [ -n "$TAG" ] || { echo "usage: $0 <tag> [service ...]" >&2; exit 2; }
 shift || true
+# Directories containing a Dockerfile. The chat needs `agent` and
+# `runtime/llm-proxy` in addition to the three original services.
 SERVICES=("$@")
 [ ${#SERVICES[@]} -gt 0 ] || SERVICES=(portal)
 
@@ -46,7 +48,8 @@ for svc in "${SERVICES[@]}"; do
   git archive "$REF" "$svc" | tar -x -C "$workdir"
   [ -d "$workdir/$svc" ] || { echo "no tracked files under '$svc'" >&2; exit 1; }
 
-  image="${REGISTRY}/sealfleet-${svc}:${TAG}"
+  # Image name is the last path segment (runtime/llm-proxy → sealfleet-llm-proxy).
+  image="${REGISTRY}/sealfleet-$(basename "$svc"):${TAG}"
   echo "==> building $image"
   docker build --platform linux/amd64 -t "$image" "$workdir/$svc"
 
