@@ -62,7 +62,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 - The chat agent now requires the operator key from its callers. `/ask`
-  trusts `X-McpFinder-*` identity headers and forwards them under a
+  trusts `X-Sealfleet-*` identity headers and forwards them under a
   delegation-enabled key, so an unauthenticated `/ask` on a public ingress
   would have let anyone act as any user.
 - The llm-proxy requires a bearer token (`LLM_PROXY_TOKEN`); an open proxy on

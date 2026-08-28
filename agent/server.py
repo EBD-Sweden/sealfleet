@@ -65,7 +65,7 @@ http = httpx.AsyncClient(
 )
 
 # Callers of THIS service (the portal) must present the same operator key.
-# /ask trusts X-McpFinder-* identity headers and forwards them to the router
+# /ask trusts X-Sealfleet-* identity headers and forwards them to the router
 # under the agent's delegation-enabled key, so an unauthenticated /ask would
 # let anyone act as any user. Unset only for local experiments.
 AGENT_API_KEY = os.getenv("AGENT_API_KEY", ROUTER_API_KEY)
@@ -134,9 +134,9 @@ app.add_middleware(
 # only for API keys with allow_identity_delegation, so the agent's own key still
 # gates the call — these decide *who* it is authorized as.
 DELEGATION_HEADERS = (
-    "X-McpFinder-User-Id",
-    "X-McpFinder-Tenant-Id",
-    "X-McpFinder-Groups",
+    "X-Sealfleet-User-Id",
+    "X-Sealfleet-Tenant-Id",
+    "X-Sealfleet-Groups",
 )
 
 # Reserved credential scope: assigned_mcp = "llm:<provider>[:<model>]".
@@ -920,9 +920,9 @@ async def ask(req: AskRequest, request: Request):
                 403, "Could not use that provider credential. Check it is active "
                      "and that you have permission to use it."
             )
-        llm_headers["X-McpFinder-LLM-Key"] = key
+        llm_headers["X-Sealfleet-LLM-Key"] = key
         if req.base_url:
-            llm_headers["X-McpFinder-LLM-Base-Url"] = req.base_url
+            llm_headers["X-Sealfleet-LLM-Base-Url"] = req.base_url
 
     # 1. Fetch available pipeline tools
     try:

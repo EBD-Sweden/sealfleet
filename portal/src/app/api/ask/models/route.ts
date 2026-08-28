@@ -10,7 +10,7 @@ export async function GET() {
   if (error || !context) return error ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const headers: Record<string, string> = {};
-  for (const h of ["X-API-Key", "X-McpFinder-User-Id", "X-McpFinder-Tenant-Id", "X-McpFinder-Groups"]) {
+  for (const h of ["X-API-Key", "X-Sealfleet-User-Id", "X-Sealfleet-Tenant-Id", "X-Sealfleet-Groups"]) {
     if (context.backendHeaders[h]) headers[h] = context.backendHeaders[h];
   }
 

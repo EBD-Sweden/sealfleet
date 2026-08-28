@@ -164,7 +164,7 @@ near-JSON before giving up.
 - `ROUTER_API_KEY` — operator key sent as `X-API-Key`; required when the router
   runs with `REQUIRE_AUTH=true`. Compose injects `/keys/runtime-api-key`.
 - `AGENT_API_KEY` (default = `ROUTER_API_KEY`) — key callers of *this* service
-  must present. `/ask` trusts `X-McpFinder-*` identity headers and forwards them
+  must present. `/ask` trusts `X-Sealfleet-*` identity headers and forwards them
   under the agent's delegation-enabled key, so an unauthenticated `/ask` would
   let anyone act as any user. The portal forwards its `X-API-Key`.
 - `OPENAI_API_KEY` — sent to the llm-proxy as the bearer token
@@ -179,7 +179,7 @@ near-JSON before giving up.
   as the delegated user; empty without identity)
 - `POST /ask` — `{question, model?, credential_id?, base_url?}` → pipeline
   selection (or authoring) → run → prose answer. Identity headers
-  `X-McpFinder-User-Id/Tenant-Id/Groups` are forwarded to every router call.
+  `X-Sealfleet-User-Id/Tenant-Id/Groups` are forwarded to every router call.
 
 ---
 
@@ -219,7 +219,7 @@ check jobs, manage credential *metadata* and policy, read audit, scale.
 
 **Security model — a translator, never a second authorization path.** Every
 tool forwards to the existing REST route over loopback carrying the caller's
-own headers (`X-API-Key` / `Authorization` / `X-McpFinder-*` delegated
+own headers (`X-API-Key` / `Authorization` / `X-Sealfleet-*` delegated
 identity). `_authorize_action`, tenant scoping, rate limits and audit run
 exactly as for REST; a 403 from REST surfaces as an `isError` tool result with
 the same message. **No tool returns a secret value** — `credential_use` is
@@ -267,9 +267,9 @@ without any MCP or agent knowing the difference.
 - `byo/<provider>/<model>` — **pinned** to the tenant's own provider. Also has
   no fallback: a tenant that chose its own account must not be silently served
   by the platform's backend. The key arrives per request in the
-  `X-McpFinder-LLM-Key` header (resolved upstream from the credential store);
+  `X-Sealfleet-LLM-Key` header (resolved upstream from the credential store);
   the proxy neither stores nor logs it. `byo/custom/...` takes its endpoint
-  from `X-McpFinder-LLM-Base-Url`.
+  from `X-Sealfleet-LLM-Base-Url`.
 - anything else — routing priority below.
 
 **Routing priority (unpinned):**

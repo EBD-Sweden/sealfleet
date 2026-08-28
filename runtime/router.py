@@ -2726,7 +2726,7 @@ def _authorize_action(request: Request, action: str) -> None:
     # carry a JWT is_admin claim, so it must come from the DB — the same reason
     # _mcp_access re-checks the users table. Gated on `delegated_from`, which is
     # set only for keys with allow_identity_delegation, so a bare API key cannot
-    # escalate by inventing an X-McpFinder-User-Id header.
+    # escalate by inventing an X-Sealfleet-User-Id header.
     if (identity or {}).get("delegated_from") and _db_user_is_platform_admin(str(user_id)):
         _remember_authorized_action(request, action)
         return

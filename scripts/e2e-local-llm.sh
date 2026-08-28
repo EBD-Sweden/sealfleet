@@ -32,7 +32,7 @@ read -r ADMIN_ID ADMIN_TENANT <<<"$(docker compose exec -T db psql -U admin -d m
 [ -n "${ADMIN_ID:-}" ] || { echo "no active platform admin found"; exit 1; }
 
 AUTH=(-H "X-API-Key: $API_KEY")
-AS_ADMIN=(-H "X-API-Key: $API_KEY" -H "X-McpFinder-User-Id: $ADMIN_ID" -H "X-McpFinder-Tenant-Id: $ADMIN_TENANT")
+AS_ADMIN=(-H "X-API-Key: $API_KEY" -H "X-Sealfleet-User-Id: $ADMIN_ID" -H "X-Sealfleet-Tenant-Id: $ADMIN_TENANT")
 
 jqp() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)" 2>/dev/null; }
 code() { curl -s -o /dev/null -w '%{http_code}' -m "${2:-10}" "${@:3}" "$1"; }
@@ -220,12 +220,12 @@ fi
 head_ "9. Authorization matrix"
 c=$(code "$ROUTER/credentials" 10 "${AUTH[@]}");                       [ "$c" = 403 ] && ok "bare API key denied credential.read" || no "bare key denied" "HTTP $c"
 c=$(code "$ROUTER/credentials" 10 "${AUTH[@]}" "${AS_ADMIN[@]}");      [ "$c" = 200 ] && ok "delegated admin allowed"            || no "delegated admin allowed" "HTTP $c"
-c=$(code "$ROUTER/credentials" 10 "${AUTH[@]}" -H "X-McpFinder-User-Id: 11111111-1111-1111-1111-111111111111" -H "X-McpFinder-Tenant-Id: $ADMIN_TENANT")
+c=$(code "$ROUTER/credentials" 10 "${AUTH[@]}" -H "X-Sealfleet-User-Id: 11111111-1111-1111-1111-111111111111" -H "X-Sealfleet-Tenant-Id: $ADMIN_TENANT")
 [ "$c" = 403 ] && ok "forged user id denied" || no "forged user id denied" "HTTP $c"
 c=$(code "$ROUTER/v2/pipelines" 10);                                   [ "$c" = 401 ] && ok "unauthenticated router call rejected" || no "unauthenticated rejected" "HTTP $c"
 c=$(code "$PORTAL/api/ask" 10);                                        [ "$c" = 401 ] && ok "portal chat behind auth"             || no "portal chat behind auth" "HTTP $c"
 c=$(code "$AGENT/models" 10);                                          [ "$c" = 401 ] && ok "agent rejects callers without the key"  || no "agent rejects unauth callers" "HTTP $c"
-c=$(code "$AGENT/ask" 10 -X POST -H 'Content-Type: application/json' -H "X-McpFinder-User-Id: $ADMIN_ID" -d '{"question":"x"}'); [ "$c" = 401 ] && ok "agent ignores identity headers without the key" || no "agent identity spoof blocked" "HTTP $c"
+c=$(code "$AGENT/ask" 10 -X POST -H 'Content-Type: application/json' -H "X-Sealfleet-User-Id: $ADMIN_ID" -d '{"question":"x"}'); [ "$c" = 401 ] && ok "agent ignores identity headers without the key" || no "agent identity spoof blocked" "HTTP $c"
 
 # --------------------------------------------------------------------------
 head_ "10. Platform control over MCP (POST /mcp)"

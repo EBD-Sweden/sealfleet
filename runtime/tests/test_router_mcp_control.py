@@ -112,8 +112,8 @@ async def test_delegated_identity_headers_are_forwarded(mcp_client, monkeypatch)
 
     monkeypatch.setattr(router_mcp, "_forward", fake_forward)
     await call(mcp_client, "tools/call", {"name": "platform_status", "arguments": {}},
-               headers={"X-API-Key": QA_KEY, "X-McpFinder-User-Id": "u1", "X-McpFinder-Tenant-Id": "t1"})
-    assert seen["x-mcpfinder-user-id"] == "u1" and seen["x-mcpfinder-tenant-id"] == "t1"
+               headers={"X-API-Key": QA_KEY, "X-Sealfleet-User-Id": "u1", "X-Sealfleet-Tenant-Id": "t1"})
+    assert seen["x-sealfleet-user-id"] == "u1" and seen["x-sealfleet-tenant-id"] == "t1"
     assert seen["x-api-key"] == QA_KEY
 
 

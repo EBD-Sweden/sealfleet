@@ -8,7 +8,7 @@ submit jobs, manage credential metadata and policy, read audit.
 
 Security model — a translator, never a second authorization path
   Every tool forwards to the existing REST route over loopback, carrying the
-  caller's own credentials (X-API-Key / Authorization / X-McpFinder-* delegated
+  caller's own credentials (X-API-Key / Authorization / X-Sealfleet-* delegated
   identity). So `_authorize_action`, tenant scoping, rate limits, and audit run
   exactly as they do for REST. There is no tool that returns a secret value:
   `credential_use` is deliberately absent — an LLM must never hold a secret.
@@ -30,7 +30,7 @@ PROTOCOL_VERSION = "2025-03-26"
 SERVER_INFO = {"name": "sealfleet-platform", "version": "0.1.0"}
 FORWARDED_HEADERS = (
     "x-api-key", "authorization",
-    "x-mcpfinder-user-id", "x-mcpfinder-tenant-id", "x-mcpfinder-groups",
+    "x-sealfleet-user-id", "x-sealfleet-tenant-id", "x-sealfleet-groups",
 )
 MAX_TEXT = int(os.environ.get("MCP_CONTROL_MAX_TEXT", "60000"))
 

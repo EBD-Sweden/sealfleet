@@ -73,8 +73,8 @@ function callerAuthorized(req) {
 // key per request (resolved from the platform credential store upstream) —
 // this proxy never stores or logs it.
 const BYO_PREFIX = "byo/";
-const BYO_KEY_HEADER = "x-mcpfinder-llm-key";
-const BYO_BASE_URL_HEADER = "x-mcpfinder-llm-base-url";
+const BYO_KEY_HEADER = "x-sealfleet-llm-key";
+const BYO_BASE_URL_HEADER = "x-sealfleet-llm-base-url";
 const BYO_TIMEOUT_MS = parseInt(process.env.BYO_LLM_TIMEOUT_MS || "90000", 10);
 
 // Known OpenAI-compatible providers. "custom" takes its base URL from the

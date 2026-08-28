@@ -6,7 +6,7 @@ const AGENT_URL = process.env.AGENT_URL || "http://localhost:8050";
 /** Identity headers only — the agent presents its own backend key downstream. */
 function delegationHeaders(backendHeaders: Record<string, string>) {
   const out: Record<string, string> = { "Content-Type": "application/json" };
-  for (const h of ["X-API-Key", "X-McpFinder-User-Id", "X-McpFinder-Tenant-Id", "X-McpFinder-Groups"]) {
+  for (const h of ["X-API-Key", "X-Sealfleet-User-Id", "X-Sealfleet-Tenant-Id", "X-Sealfleet-Groups"]) {
     if (backendHeaders[h]) out[h] = backendHeaders[h];
   }
   return out;

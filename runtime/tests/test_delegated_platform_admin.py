@@ -1,6 +1,6 @@
 """Authorization for platform admins acting through a delegating API key.
 
-The portal proxies with its backend API key plus X-McpFinder-* identity
+The portal proxies with its backend API key plus X-Sealfleet-* identity
 headers; a user's JWT is_admin claim never reaches the router that way. So
 _authorize_action consults the users table — but only for identities that a
 delegation-enabled key actually vouched for, otherwise any API key could
