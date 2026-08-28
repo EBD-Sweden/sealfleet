@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Send, Loader2, ChevronDown, ChevronUp } from "lucide-react";
+import { Send, Loader2, ChevronDown, ChevronUp, Cpu, Cloud } from "lucide-react";
 
 // --- Types ---
 
@@ -17,6 +17,13 @@ interface AskResponse {
   answer: string;
   raw_result: Record<string, unknown>;
   reasoning: string;
+}
+
+interface BrainOption {
+  id: string;
+  label: string;
+  kind: "local" | "cloud";
+  description: string;
 }
 
 interface ChatMessage {
@@ -33,7 +40,38 @@ export default function AskPage() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [brains, setBrains] = useState<BrainOption[]>([]);
+  const [model, setModel] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Which brains this deployment offers. Restore the last choice, but only if
+  // it is still on offer — an operator may have stopped the local model.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/ask/models");
+        if (!res.ok) return;
+        const data: { default: string | null; models: BrainOption[] } = await res.json();
+        if (cancelled) return;
+
+        setBrains(data.models ?? []);
+        const saved = (() => {
+          try { return localStorage.getItem("mcpfinder.ask.model"); } catch { return null; }
+        })();
+        const stillOffered = data.models?.some((m) => m.id === saved);
+        setModel(stillOffered ? saved : (data.models?.[0]?.id ?? data.default ?? null));
+      } catch {
+        // Picker is a convenience; the chat still works on the server default.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const selectBrain = (id: string) => {
+    setModel(id);
+    try { localStorage.setItem("mcpfinder.ask.model", id); } catch { /* private mode */ }
+  };
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -55,7 +93,7 @@ export default function AskPage() {
       const res = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify(model ? { question, model } : { question }),
       });
 
       const elapsed = Date.now() - start;
@@ -162,6 +200,47 @@ export default function AskPage() {
 
       {/* Input bar */}
       <div className="border-t pt-4">
+        {/* Brain picker — only worth showing when there is a real choice */}
+        {brains.length > 1 && (
+          <div className="flex items-center gap-2 pb-3">
+            <span className="text-[11px] text-muted-foreground">Answer using</span>
+            <div className="flex gap-1.5 flex-wrap">
+              {brains.map((b) => {
+                const active = b.id === model;
+                const Icon = b.kind === "local" ? Cpu : Cloud;
+                return (
+                  <button
+                    key={b.id}
+                    onClick={() => selectBrain(b.id)}
+                    title={b.description}
+                    aria-pressed={active}
+                    className={`inline-flex items-center gap-1.5 text-[11px] border rounded-full px-2.5 py-1 transition-colors ${
+                      active
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "hover:bg-accent"
+                    }`}
+                  >
+                    <Icon className="h-3 w-3" />
+                    {b.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* One local brain and nothing else: state the guarantee rather than
+            offering a choice that isn't one. */}
+        {brains.length === 1 && brains[0].kind === "local" && (
+          <div className="flex items-center gap-1.5 pb-3 text-[11px] text-muted-foreground">
+            <Cpu className="h-3 w-3" />
+            <span>
+              Answering with <span className="font-mono">{brains[0].label}</span> on this
+              machine — prompts never leave the host.
+            </span>
+          </div>
+        )}
+
         <div className="flex gap-3">
           <Input
             placeholder="Ask a question..."

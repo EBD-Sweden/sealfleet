@@ -90,6 +90,45 @@ Then:
   (`scripts/001_create_api_keys.sql`) so agents/CLI can invoke tools and run pipelines
   out of the box — e.g. `MCPFINDER_API_KEY=<key> python -m runtime.cli status`.
 
+### Choose the brain: cloud provider or a local model
+
+Every LLM call the platform makes goes through one door — the **llm-proxy**
+(`runtime/llm-proxy/`, port 3456, OpenAI-compatible). Point it at a cloud
+provider, at a model running on your own hardware, or both.
+
+```bash
+# Cloud (any one of these is enough)
+ANTHROPIC_API_KEY=sk-ant-...  docker compose up -d
+AI_GATEWAY_API_KEY=...        docker compose up -d
+```
+
+**Local model — nothing leaves the machine.** Requests whose model name starts
+with `local/` are pinned to the on-box server and **never fall back to a cloud
+backend**, so a regulated tenant can prove its prompts did not leave the host.
+
+```bash
+# Option A: the bundled NVIDIA NIM profile (needs a GPU + NGC_API_KEY).
+#   First start builds the engine and can take 10–30 min; ~/.cache/nim makes
+#   later starts fast.
+NGC_API_KEY=... docker compose --profile local-llm up -d
+
+# Option B: bring your own OpenAI-compatible server (vLLM, llama.cpp, Ollama, …)
+LOCAL_LLM_BASE_URL=http://host.docker.internal:11434/v1 \
+LOCAL_LLM_MODEL=qwen2.5:14b \
+docker compose up -d
+```
+
+Then pin the chat to it:
+
+```bash
+CHAT_MODEL=local/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning docker compose up -d core-agent
+curl localhost:3456/health        # shows mode + whether the local route is enabled
+```
+
+Because it is plain OpenAI-compatible HTTP, a model you fine-tuned yourself
+(e.g. a LoRA served by NIM or vLLM) drops in the same way — train a domain model
+on your own data, serve it locally, and the whole platform uses it.
+
 **Connect your own IdP (Keycloak, Okta, Azure AD, Auth0, …)** in the portal under
 **Admin → Tenants** as the admin user:
 1. Create a tenant for your organization, enable SSO, and set OIDC `issuer`,

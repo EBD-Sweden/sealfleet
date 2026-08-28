@@ -5024,6 +5024,10 @@ async def _run_v2_pipeline(
             step_results[step_id] = {
                 "output": step_output,
                 "duration_ms": int((time.time() - step_start) * 1000),
+                # Which capability actually ran. Callers (and the audit trail)
+                # need this to show the resolved chain, not just step ids.
+                **({"mcp": step["mcp"], "tool": step["tool"]} if step.get("mcp") else {}),
+                **({"pipeline": step["pipeline"]} if step.get("pipeline") else {}),
             }
             context["steps"][step_id] = {"output": step_output}
 
@@ -5068,6 +5072,33 @@ async def _v2_call_pipeline(
 
 # ---- V2 Pipeline Endpoints ------------------------------------------------
 
+def _v2_input_schema(pipeline: dict) -> dict:
+    """JSON-Schema view of a v2 pipeline's inputs, for MCP-style tool listings.
+
+    An input is required only when it declares no default. Types are mapped from
+    the YAML's loose names onto JSON Schema.
+    """
+    type_map = {
+        "string": "string", "str": "string", "text": "string",
+        "number": "number", "float": "number", "int": "integer", "integer": "integer",
+        "bool": "boolean", "boolean": "boolean",
+        "list": "array", "array": "array",
+        "dict": "object", "object": "object",
+    }
+    properties, required = {}, []
+    for name, spec in (pipeline.get("inputs") or {}).items():
+        spec = spec if isinstance(spec, dict) else {}
+        prop = {"type": type_map.get(str(spec.get("type", "string")).lower(), "string")}
+        if spec.get("description"):
+            prop["description"] = spec["description"]
+        if "default" in spec:
+            prop["default"] = spec["default"]
+        else:
+            required.append(name)
+        properties[name] = prop
+    return {"type": "object", "properties": properties, "required": required}
+
+
 @app.get("/v2/pipelines")
 async def list_v2_pipelines():
     """List all loaded v2 pipelines."""
@@ -5076,8 +5107,18 @@ async def list_v2_pipelines():
             {
                 "name": p["name"],
                 "version": p.get("version", 2),
-                "description": p.get("description", ""),
+                # Agents select tools by description; when a pipeline omits one,
+                # fall back to what it declares it produces so it stays selectable.
+                "description": p.get("description")
+                    or (
+                        "Produces: " + ", ".join(f"{k} ({v})" for k, v in p["expected_output"].items())
+                        if isinstance(p.get("expected_output"), dict) and p["expected_output"]
+                        else ""
+                    ),
                 "inputs": list(p.get("inputs", {}).keys()),
+                # Full JSON Schema so agents can build a tool call without a
+                # second round-trip per pipeline.
+                "input_schema": _v2_input_schema(p),
                 "steps": len(p.get("steps", [])),
             }
             for p in v2_pipelines.values()

@@ -129,15 +129,61 @@
 **Port:** 8050
 
 **Modules:**
-- `core-agent/agent.py` — FastAPI service with /health, /capabilities, /ask endpoints + CLI mode ✅
+- `agent/server.py` — **the deployed service** (built by `agent/Dockerfile`, used by
+  compose and k8s). Lists named *and* v2 pipelines, one LLM call to select a
+  pipeline + extract args, keyword fallback on LLM timeout ✅
+- `agent/requirements.txt` — Python dependencies ✅
+- `core-agent/agent.py` — earlier `/resolve`-based variant; not containerised.
+  Reads `LLM_BASE_URL`/`LLM_MODEL`, whereas the deployed `agent/server.py` reads
+  `OPENAI_BASE_URL`/`OPENAI_MODEL` ⚠️ *(divergence — consolidate)*
 - `core-agent/mcp.yaml` — Self-describing MCP manifest ✅
-- `core-agent/requirements.txt` — Python dependencies ✅
-- `core-agent/.env` — Configuration (runtime URL, LLM proxy, model) ✅
+
+**Configuration:**
+- `ROUTER_URL` — runtime router (default `http://localhost:8040`)
+- `ROUTER_API_KEY` — operator key sent as `X-API-Key`; required when the router
+  runs with `REQUIRE_AUTH=true`. Compose injects `/keys/runtime-api-key`.
+- `OPENAI_BASE_URL` — the llm-proxy (default `http://localhost:3456/v1`)
+- `OPENAI_MODEL` — model to plan with. Prefix `local/` to pin the on-box model.
 
 **Key interfaces:**
 - `GET /health` — Health check
-- `GET /capabilities` — Proxies runtime /capabilities
-- `POST /ask` — Natural language question → LLM reasoning → /resolve → formatted answer
+- `POST /ask` — Natural language question → LLM pipeline selection → pipeline run → formatted answer
+
+---
+
+## `runtime/llm-proxy/` — Single LLM Entry Point
+**Status:** ✅ Working
+**Purpose:** OpenAI-compatible front door for every LLM call the platform makes.
+Lets a tenant choose its brain — an on-box local model or a cloud provider —
+without any MCP or agent knowing the difference.
+**Language:** Node (built-ins only, no dependencies)
+**Port:** 3456
+
+**Modules:**
+- `runtime/llm-proxy/index.js` — proxy + Anthropic⇄OpenAI translation ✅
+
+**Model selection:**
+- `local/<model>` — **pinned** to `LOCAL_LLM_BASE_URL`. Never falls back to a
+  cloud backend, so the request provably cannot leave the host. This is the
+  guarantee regulated tenants (banks, health) need.
+- anything else — routing priority below.
+
+**Routing priority (unpinned):**
+1. Claude CLI / Anthropic OAuth → Anthropic API
+2. `AI_GATEWAY_API_KEY` → AI Gateway
+3. `ANTHROPIC_API_KEY` → Anthropic API
+4. `LOCAL_LLM_BASE_URL` → local OpenAI-compatible server
+5. 503
+
+**Configuration:**
+- `LOCAL_LLM_BASE_URL` — any OpenAI-compatible server (NVIDIA NIM, vLLM,
+  llama.cpp, Ollama). Empty disables the local route.
+- `LOCAL_LLM_MODEL` — served model name used when the `local/` prefix carries none
+- `LOCAL_LLM_TIMEOUT_MS` — default 300000 (local models are slower to first token)
+
+**Key interfaces:**
+- `GET /health` — mode + local backend config
+- `POST /v1/chat/completions` — OpenAI-compatible
 
 ---
 

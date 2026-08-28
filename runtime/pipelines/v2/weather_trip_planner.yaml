@@ -6,6 +6,11 @@
 # reference example for "build a pipeline, then visualize its output".
 name: weather_trip_planner
 version: 2
+description: >-
+  Compare the weather across several cities and rank them for a trip. Fetches
+  each city's past week and ~10-day forecast, then scores them on temperature,
+  sunshine and wind. Use for any question about weather, forecast, or which
+  city to travel to.
 inputs:
   cities:
     type: list

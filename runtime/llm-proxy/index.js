@@ -7,11 +7,18 @@
  * All MCPs call http://host.k3d.internal:3456/v1 — this is the single
  * LLM entry point for the entire McpFinder platform.
  *
+ * Model selection:
+ *   model "local/..."  → PINNED to the on-box model. Never falls back to a
+ *                        cloud backend, so the request cannot leave the host.
+ *                        This is the guarantee regulated tenants need.
+ *   anything else      → the routing priority below.
+ *
  * Routing priority:
  *   1. Claude CLI / Anthropic OAuth              → Anthropic API directly (preferred)
  *   2. AI_GATEWAY_API_KEY                        → AI Gateway (fallback)
  *   3. ANTHROPIC_API_KEY (sk-ant-api...)        → Anthropic API directly (fallback)
- *   4. 503
+ *   4. LOCAL_LLM_BASE_URL                        → local OpenAI-compatible server (fallback)
+ *   5. 503
  *
  * OAuth token sources, in order:
  *   - CLAUDE_CODE_OAUTH_TOKEN
@@ -38,6 +45,13 @@ const CLAUDE_CODE_CREDENTIALS_PATH = process.env.CLAUDE_CODE_CREDENTIALS_PATH ||
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const AI_GATEWAY_API_KEY = process.env.AI_GATEWAY_API_KEY || "";
 const GATEWAY_BASE = process.env.GATEWAY_URL || "https://ai-gateway.vercel.sh/v1";
+
+// Local, on-box model: any OpenAI-compatible server (NVIDIA NIM, vLLM,
+// llama.cpp, Ollama). Empty base URL disables the local route entirely.
+const LOCAL_LLM_BASE_URL = (process.env.LOCAL_LLM_BASE_URL || "").replace(/\/$/, "");
+const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || "";
+const LOCAL_LLM_TIMEOUT_MS = parseInt(process.env.LOCAL_LLM_TIMEOUT_MS || "300000", 10);
+const LOCAL_PREFIX = "local/";
 
 // --- Map OpenAI model names to Anthropic model IDs ---
 const MODEL_MAP = {
@@ -79,6 +93,7 @@ function getBackendMode() {
   if (oauthToken) return "anthropic-oauth";
   if (AI_GATEWAY_API_KEY) return "ai-gateway";
   if (ANTHROPIC_API_KEY) return "anthropic-api-key";
+  if (LOCAL_LLM_BASE_URL) return "local";
   return "no-backend";
 }
 
@@ -225,6 +240,69 @@ function callVercelGateway(openAiBody) {
   });
 }
 
+/** Forward request to a local OpenAI-compatible server (NIM / vLLM / llama.cpp / Ollama) */
+function callLocal(openAiBody) {
+  return new Promise((resolve, reject) => {
+    if (!LOCAL_LLM_BASE_URL) return reject(new Error("LOCAL_LLM_BASE_URL not set"));
+
+    // Pinned requests name the local model directly (minus the marker). Unpinned
+    // ones arrive here as a fallback still carrying a cloud model name the local
+    // server has never heard of, so serve them with the model it actually has.
+    let model = openAiBody.model || "";
+    if (model.startsWith(LOCAL_PREFIX)) {
+      model = model.slice(LOCAL_PREFIX.length) || LOCAL_LLM_MODEL;
+    } else {
+      model = LOCAL_LLM_MODEL || model;
+    }
+
+    const parsed = url.parse(LOCAL_LLM_BASE_URL);
+    const isHttps = parsed.protocol === "https:";
+    const transport = isHttps ? https : http;
+    const payload = Buffer.from(JSON.stringify({ ...openAiBody, model }));
+
+    const opts = {
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: (parsed.path || "").replace(/\/$/, "") + "/chat/completions",
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": payload.length,
+      },
+      timeout: LOCAL_LLM_TIMEOUT_MS,
+    };
+
+    const req = transport.request(opts, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const raw = Buffer.concat(chunks).toString();
+        let data;
+        try { data = JSON.parse(raw); }
+        catch {
+          // A NIM/vLLM server still building its engine answers with plain text,
+          // so surface the status and a snippet rather than a bare parse error.
+          return reject(new Error(
+            `Local LLM HTTP ${res.statusCode} (non-JSON): ${raw.slice(0, 120)}`
+          ));
+        }
+
+        if ((res.statusCode || 500) >= 400) {
+          return reject(new Error(data?.error?.message || `Local LLM HTTP ${res.statusCode}`));
+        }
+        if (!Array.isArray(data?.choices)) {
+          return reject(new Error("Local LLM response missing choices"));
+        }
+        resolve(data);
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Local LLM timeout")); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 // --- HTTP server ---
 
 const server = http.createServer((req, res) => {
@@ -236,7 +314,15 @@ const server = http.createServer((req, res) => {
 
   // Health
   if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
-    return sendJson(200, { status: "ok", service: "llm-proxy", mode: getBackendMode(), port: PORT });
+    return sendJson(200, {
+      status: "ok",
+      service: "llm-proxy",
+      mode: getBackendMode(),
+      port: PORT,
+      local: LOCAL_LLM_BASE_URL
+        ? { enabled: true, base_url: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL }
+        : { enabled: false },
+    });
   }
 
   if (!req.url.includes("chat/completions")) {
@@ -252,6 +338,23 @@ const server = http.createServer((req, res) => {
 
     const model = body.model || "anthropic/claude-haiku-4-5";
     console.log(`[llm-proxy] ${new Date().toISOString()} model=${model}`);
+
+    // Route 0: model pinned to the on-box server with a "local/" prefix.
+    // Deliberately has NO fallback — a tenant that pins local must never have
+    // its prompt silently sent to a cloud provider because the box was busy.
+    if (model.startsWith(LOCAL_PREFIX)) {
+      if (!LOCAL_LLM_BASE_URL) {
+        return sendJson(503, { error: { message: "Local LLM requested but LOCAL_LLM_BASE_URL is not configured" } });
+      }
+      try {
+        const result = await callLocal(body);
+        console.log(`[llm-proxy] OK via local (pinned)`);
+        return sendJson(200, result);
+      } catch (err) {
+        console.error(`[llm-proxy] local (pinned) failed: ${err.message}`);
+        return sendJson(502, { error: { message: `Local LLM unavailable: ${err.message}` } });
+      }
+    }
 
     // Route 1: Claude CLI / Anthropic OAuth (preferred)
     const oauthToken = getAnthropicOauthToken();
@@ -277,17 +380,34 @@ const server = http.createServer((req, res) => {
     }
 
     // Route 3: Anthropic API key (fallback)
+    let lastError = null;
     if (ANTHROPIC_API_KEY) {
       try {
         const result = await callAnthropicDirect(body, ANTHROPIC_API_KEY, false);
         console.log(`[llm-proxy] OK via anthropic-api-key`);
         return sendJson(200, result);
       } catch (err) {
-        console.error(`[llm-proxy] all backends failed. Last: ${err.message}`);
-        return sendJson(502, { error: { message: `LLM unavailable: ${err.message}` } });
+        lastError = err;
+        console.warn(`[llm-proxy] anthropic-api-key failed: ${err.message} — trying next`);
       }
     }
 
+    // Route 4: local on-box model (last resort for unpinned requests)
+    if (LOCAL_LLM_BASE_URL) {
+      try {
+        const result = await callLocal(body);
+        console.log(`[llm-proxy] OK via local (fallback)`);
+        return sendJson(200, result);
+      } catch (err) {
+        lastError = err;
+        console.warn(`[llm-proxy] local failed: ${err.message}`);
+      }
+    }
+
+    if (lastError) {
+      console.error(`[llm-proxy] all backends failed. Last: ${lastError.message}`);
+      return sendJson(502, { error: { message: `LLM unavailable: ${lastError.message}` } });
+    }
     return sendJson(503, { error: { message: "No LLM backend configured" } });
   });
 

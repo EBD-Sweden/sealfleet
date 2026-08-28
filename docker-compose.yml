@@ -155,6 +155,7 @@ services:
       RUNTIME_URL: "http://router:8040"
       REGISTRY_URL: "http://registry:8010"
       DEPLOY_URL: "http://deploy:8030"
+      AGENT_URL: "http://core-agent:8050"
       NODE_ENV: "production"
       # Browser-visible base URL — used for session callbacks and to build the
       # OIDC redirect_uri handed to your IdP. Change if you remap the port.
@@ -183,6 +184,87 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+
+  # Single LLM entry point for the whole platform (OpenAI-compatible, port 3456).
+  # Routes to: local NIM (model prefixed "local/"), then Claude OAuth / AI Gateway
+  # / Anthropic key. Pure Node built-ins — no build step, no dependencies.
+  llm-proxy:
+    image: node:22-alpine
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./runtime/llm-proxy:/app:ro
+    command: ["node", "index.js"]
+    environment:
+      LLM_PROXY_PORT: "3456"
+      # Local on-box model (see the `local-llm` profile below, or point at your
+      # own OpenAI-compatible server). Requests whose model starts with "local/"
+      # are pinned here and never egress.
+      LOCAL_LLM_BASE_URL: "${LOCAL_LLM_BASE_URL:-http://local-llm:8000/v1}"
+      LOCAL_LLM_MODEL: "${LOCAL_LLM_MODEL:-nvidia/nemotron-3-nano-omni-30b-a3b-reasoning}"
+      # Cloud fallbacks — all optional; set what you use.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      AI_GATEWAY_API_KEY: "${AI_GATEWAY_API_KEY:-}"
+      CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN:-}"
+    ports: ["3456:3456"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3456/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # LLM-powered chat agent backing the portal's /ask page. Maps a natural
+  # language question to a pipeline, runs it via the router, formats the answer.
+  core-agent:
+    build: {context: ./agent}
+    restart: unless-stopped
+    depends_on:
+      router: {condition: service_healthy}
+      keygen: {condition: service_completed_successfully}
+      llm-proxy: {condition: service_started}
+    environment:
+      ROUTER_URL: "http://router:8040"
+      OPENAI_BASE_URL: "http://llm-proxy:3456/v1"
+      OPENAI_MODEL: "${CHAT_MODEL:-anthropic/claude-sonnet-4-6}"
+      LLM_TIMEOUT: "${LLM_TIMEOUT:-8}"
+    volumes:
+      - mcpfinder_keys:/keys:ro
+    # The router requires auth; present the same per-deployment operator key the
+    # migrate step seeded (grants pipeline.invoke / agent.invoke, nothing more).
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export ROUTER_API_KEY="$$(cat /keys/runtime-api-key)"
+        exec uvicorn server:app --host 0.0.0.0 --port 8050
+    ports: ["8050:8050"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8050/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # On-box NVIDIA NIM. Opt-in: `docker compose --profile local-llm up`.
+  # Requires an NVIDIA GPU + container toolkit and NGC_API_KEY. First start
+  # downloads/compiles the engine and can take ~10-30 min; the ~/.cache/nim
+  # mount makes later starts fast.
+  local-llm:
+    image: "${LOCAL_NIM_IMAGE:-nvcr.io/nim/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:latest}"
+    profiles: ["local-llm"]
+    restart: unless-stopped
+    gpus: all
+    shm_size: "32gb"
+    environment:
+      NGC_API_KEY: "${NGC_API_KEY:-}"
+    volumes:
+      - "${LOCAL_NIM_CACHE:-${HOME}/.cache/nim}:/opt/nim/.cache"
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 60
+      start_period: 30m
 
   # Live demo MCP so the catalog has an invocable tool out of the box (fake data
   # only — see mcps/demo_sandbox). The network alias matches the endpoint in
