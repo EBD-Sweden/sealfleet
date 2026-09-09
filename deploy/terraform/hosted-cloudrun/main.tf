@@ -19,8 +19,9 @@ locals {
   # public half at /api/.well-known/jwks.json, which the router fetches to verify
   # portal sessions. Reuse the same generated key in PKCS8 form.
   nextauth_rs256_private_key = var.router_rs256_private_key != "" ? var.router_rs256_private_key : tls_private_key.router.private_key_pem_pkcs8
-  billing_cron_secret      = var.billing_cron_secret != "" ? var.billing_cron_secret : random_password.billing_cron_secret.result
-  image                    = { for s in ["runtime", "registry", "portal"] : s => "${var.image_registry}/sealfleet-${s}:${var.image_tag}" }
+  billing_cron_secret        = var.billing_cron_secret != "" ? var.billing_cron_secret : random_password.billing_cron_secret.result
+  image                      = { for s in ["runtime", "registry", "portal", "agent", "llm-proxy"] : s => "${var.image_registry}/sealfleet-${s}:${var.image_tag}" }
+  runtime_api_key            = var.runtime_api_key != "" ? var.runtime_api_key : random_password.runtime_api_key.result
   # Create the usage-reporter schedule only if billing is on and a schedule is set.
   usage_reporter_enabled = var.stripe_secret_key != "" && var.stripe_price_hosted_usage != "" && var.usage_report_schedule != ""
 }
@@ -40,6 +41,11 @@ resource "random_password" "billing_cron_secret" {
   special = false
 }
 
+resource "random_password" "runtime_api_key" {
+  length  = 44
+  special = false
+}
+
 resource "tls_private_key" "router" {
   algorithm = "RSA"
   rsa_bits  = 2048
@@ -50,13 +56,32 @@ resource "tls_private_key" "router" {
 # ---------------------------------------------------------------------------
 locals {
   secrets = {
-    DATABASE_URL             = var.database_url
-    ENCRYPTION_KEY           = local.encryption_key
+    DATABASE_URL               = var.database_url
+    ENCRYPTION_KEY             = local.encryption_key
     ROUTER_RS256_PRIVATE_KEY   = local.router_rs256_private_key
     NEXTAUTH_RS256_PRIVATE_KEY = local.nextauth_rs256_private_key
     NEXTAUTH_SECRET            = local.nextauth_secret
-    BILLING_CRON_SECRET      = local.billing_cron_secret
+    BILLING_CRON_SECRET        = local.billing_cron_secret
+    RUNTIME_API_KEY            = local.runtime_api_key
   }
+  # Optional secrets: created only when set. Names are a non-sensitive list so
+  # they can drive for_each; the sensitive value is looked up per name.
+  optional_secret_names  = nonsensitive(var.anthropic_api_key != "") ? toset(["ANTHROPIC_API_KEY"]) : toset([])
+  optional_secret_values = { ANTHROPIC_API_KEY = var.anthropic_api_key }
+}
+
+resource "google_secret_manager_secret" "opt" {
+  for_each  = local.optional_secret_names
+  secret_id = "${var.name}-${lower(replace(each.key, "_", "-"))}"
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "opt" {
+  for_each    = local.optional_secret_names
+  secret      = google_secret_manager_secret.opt[each.key].id
+  secret_data = local.optional_secret_values[each.key]
 }
 
 resource "google_secret_manager_secret" "s" {
@@ -240,10 +265,10 @@ resource "google_cloud_run_v2_service" "router" {
         }
       }
       dynamic "env" {
-        for_each = var.license_key != "" ? { SEALFLEET_LICENSE_KEY = var.license_key } : {}
+        for_each = nonsensitive(var.license_key != "") ? ["SEALFLEET_LICENSE_KEY"] : []
         content {
-          name  = env.key
-          value = env.value
+          name  = env.value
+          value = var.license_key
         }
       }
     }
@@ -296,6 +321,20 @@ resource "google_cloud_run_v2_service" "portal" {
       env {
         name  = "ROUTER_URL"
         value = google_cloud_run_v2_service.router.uri
+      }
+      env {
+        name  = "AGENT_URL"
+        value = google_cloud_run_v2_service.agent.uri
+      }
+      # Backend key the portal presents to the router and the chat agent.
+      env {
+        name = "RUNTIME_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.s["RUNTIME_API_KEY"].secret_id
+            version = "latest"
+          }
+        }
       }
       env {
         name  = "NEXTAUTH_URL"
@@ -397,14 +436,105 @@ resource "google_cloud_scheduler_job" "usage_reporter" {
 }
 
 # ---------------------------------------------------------------------------
+# llm-proxy — the platform's single LLM entry point (OpenAI-compatible).
+# Token-gated: callers present RUNTIME_API_KEY as their api_key.
+# ---------------------------------------------------------------------------
+resource "google_cloud_run_v2_service" "llm_proxy" {
+  name     = "${var.name}-llm-proxy"
+  location = var.region
+  ingress  = "INGRESS_TRAFFIC_ALL"
+
+  template {
+    scaling {
+      min_instance_count = var.min_instances
+      max_instance_count = var.max_instances
+    }
+    containers {
+      image = local.image["llm-proxy"]
+      env {
+        name = "LLM_PROXY_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.s["RUNTIME_API_KEY"].secret_id
+            version = "latest"
+          }
+        }
+      }
+      dynamic "env" {
+        for_each = local.optional_secret_names
+        content {
+          name = env.value
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.opt[env.value].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+    }
+  }
+  depends_on = [google_secret_manager_secret_version.v, google_secret_manager_secret_version.opt]
+}
+
+# ---------------------------------------------------------------------------
+# Chat agent — natural language → pipelines, pipeline authoring, and platform
+# operations over the router's MCP control server. Gated by RUNTIME_API_KEY.
+# ---------------------------------------------------------------------------
+resource "google_cloud_run_v2_service" "agent" {
+  name     = "${var.name}-agent"
+  location = var.region
+  ingress  = "INGRESS_TRAFFIC_ALL"
+
+  template {
+    scaling {
+      min_instance_count = var.min_instances
+      max_instance_count = var.max_instances
+    }
+    containers {
+      image = local.image["agent"]
+      env {
+        name  = "ROUTER_URL"
+        value = google_cloud_run_v2_service.router.uri
+      }
+      env {
+        name  = "OPENAI_BASE_URL"
+        value = "${google_cloud_run_v2_service.llm_proxy.uri}/v1"
+      }
+      env {
+        name  = "OPENAI_MODEL"
+        value = var.chat_model
+      }
+      # One key, three roles: presented to the router (ROUTER_API_KEY), required
+      # of callers (AGENT_API_KEY), and sent to the llm-proxy (OPENAI_API_KEY).
+      dynamic "env" {
+        for_each = toset(["ROUTER_API_KEY", "AGENT_API_KEY", "OPENAI_API_KEY"])
+        content {
+          name = env.value
+          value_source {
+            secret_key_ref {
+              secret  = google_secret_manager_secret.s["RUNTIME_API_KEY"].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+    }
+  }
+  depends_on = [google_secret_manager_secret_version.v]
+}
+
+# ---------------------------------------------------------------------------
 # Public invocation (app-level auth still applies). Toggle with
 # allow_public_invoke; requires org policy to permit allUsers.
 # ---------------------------------------------------------------------------
 resource "google_cloud_run_v2_service_iam_member" "public" {
   for_each = var.allow_public_invoke ? {
-    router   = google_cloud_run_v2_service.router.name
-    registry = google_cloud_run_v2_service.registry.name
-    portal   = google_cloud_run_v2_service.portal.name
+    router    = google_cloud_run_v2_service.router.name
+    registry  = google_cloud_run_v2_service.registry.name
+    portal    = google_cloud_run_v2_service.portal.name
+    agent     = google_cloud_run_v2_service.agent.name
+    llm_proxy = google_cloud_run_v2_service.llm_proxy.name
   } : {}
   location = var.region
   name     = each.value

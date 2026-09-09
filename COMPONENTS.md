@@ -118,10 +118,13 @@
 
 **Modules:**
 - `mcps/demo_sandbox/` — Deterministic fake-data sandbox for external testers ✅
+  (`/tools` names every accepted argument; `/call` answers a bad argument with 400)
+- `mcps/weather_trip/` — `rank_cities` rejects a non-positive `max_wind_kph`
+  with 400 (was a ZeroDivisionError → 500 when an agent passed 0 as a placeholder) ✅
 
 ---
 
-## `core-agent/` — LLM-Powered Core Agent
+## `agent/` — LLM-Powered Core Agent (chat)
 **Status:** ✅ MVP complete
 **Purpose:** Reference agent that discovers runtime capabilities, uses LLM to map natural language questions to output_type+inputs, executes via /resolve, and returns formatted answers
 **Language:** Python
@@ -129,15 +132,178 @@
 **Port:** 8050
 
 **Modules:**
-- `core-agent/agent.py` — FastAPI service with /health, /capabilities, /ask endpoints + CLI mode ✅
-- `core-agent/mcp.yaml` — Self-describing MCP manifest ✅
-- `core-agent/requirements.txt` — Python dependencies ✅
-- `core-agent/.env` — Configuration (runtime URL, LLM proxy, model) ✅
+- `agent/server.py` — the service (built by `agent/Dockerfile`; compose service
+  `core-agent`, k8s deployment `core-agent`). Lists named *and* v2 pipelines,
+  one LLM call to select a pipeline + extract args, keyword fallback on LLM
+  timeout, LLM-written prose answers ✅
+- `agent/mcp.yaml` — Self-describing MCP manifest ✅
+- `agent/requirements.txt` — Python dependencies ✅
+- *(the earlier, uncontainerised `core-agent/agent.py` was removed — it read
+  different env vars from what k8s set and nothing built it)*
+
+**Platform operations from chat:** a pseudo-tool `__platform__` routes
+"about the platform" requests to an agentic loop (`run_platform_loop`) that
+speaks MCP to the router's own `/mcp` — the same surface external clients use
+— with the logged-in user's identity on every call. Standard OpenAI
+tool-calling; capped at `PLATFORM_MAX_STEPS` (8). Native tool-calling is
+required of the model: the NIM supports it; the Anthropic path in llm-proxy
+does not yet translate `tools`.
+
+**Pipeline authoring from chat:** a pseudo-tool `__create_pipeline__` is offered
+in the same selection call as real pipelines. When chosen, the agent fetches the
+MCP tool catalog (`GET /mcp-tools`), asks the model for a v2 pipeline definition,
+registers it via `POST /v2/pipelines/deploy` (needs `pipeline.deploy` — authorized
+as the delegated user), then runs it once so the user sees it working. Selection
+and authoring run at `temperature=0`; authoring requests `response_format:
+json_object` (guided decoding on vLLM/NIM/OpenAI-compatible servers), falls back
+to unconstrained output if the provider rejects it, and makes one repair pass on
+near-JSON before giving up.
+
+**Configuration:**
+- `ROUTER_URL` — runtime router (default `http://localhost:8040`)
+- `ROUTER_API_KEY` — operator key sent as `X-API-Key`; required when the router
+  runs with `REQUIRE_AUTH=true`. Compose injects `/keys/runtime-api-key`.
+- `AGENT_API_KEY` (default = `ROUTER_API_KEY`) — key callers of *this* service
+  must present. `/ask` trusts `X-Sealfleet-*` identity headers and forwards them
+  under the agent's delegation-enabled key, so an unauthenticated `/ask` would
+  let anyone act as any user. The portal forwards its `X-API-Key`.
+- `OPENAI_API_KEY` — sent to the llm-proxy as the bearer token
+  (= `LLM_PROXY_TOKEN`).
+- `OPENAI_BASE_URL` — the llm-proxy (default `http://localhost:3456/v1`)
+- `OPENAI_MODEL` — model to plan with. Prefix `local/` to pin the on-box model.
+
+**Chat history:** conversations persist in `chats`/`chat_messages`
+(migration 021), scoped to (tenant, user). The portal's `/api/ask` creates a
+chat on the first question (titled by it), stores both turns (the agent turn
+with its full AskResponse payload, so reopening restores chain badges and raw
+results), and replays the last 8 turns to the agent as `history` — used in
+pipeline selection and the platform loop so follow-ups ("And Bergen?")
+resolve. Portal routes: `GET/POST /api/chats`, `GET/DELETE /api/chats/{id}`.
+A chat id belonging to another user is a 404. The agent itself stays
+stateless.
 
 **Key interfaces:**
 - `GET /health` — Health check
-- `GET /capabilities` — Proxies runtime /capabilities
-- `POST /ask` — Natural language question → LLM reasoning → /resolve → formatted answer
+- `GET /models` — Brains the caller may plan with: on-box `local/…`, the
+  platform's cloud default, and the tenant's own `byo/…` credentials (listed
+  as the delegated user; empty without identity)
+- `POST /ask` — `{question, model?, credential_id?, base_url?}` → pipeline
+  selection (or authoring) → run → prose answer. Identity headers
+  `X-Sealfleet-User-Id/Tenant-Id/Groups` are forwarded to every router call.
+
+---
+
+## Router endpoints added for chat + authoring
+- `GET /mcp-tools` — every callable MCP tool with its input description,
+  aggregated from each MCP's `/tools` (accepts both `{"tools":[…]}` and bare-list
+  shapes). Unreachable MCPs fall back to manifest tool names plus a `warning`.
+- `GET /v2/pipelines` — now includes `input_schema` (JSON Schema; required =
+  "no default") and a description fallback from `expected_output`.
+- `POST /v2/pipelines/run` — step results now carry `mcp`/`tool` (or
+  `pipeline`) so callers can render the resolved chain.
+- `DELETE /v2/pipelines/{name}` — remove a runtime-authored pipeline (file +
+  registration). Requires `pipeline.deploy`. Shipped examples return 409.
+- `POST /v2/pipelines/deploy` — refuses to shadow a shipped example's name
+  unless the body carries `"replace": true` (409 otherwise), so an agent
+  re-deploying what it just read cannot overwrite an example by accident.
+- `POST /jobs` / `POST /jobs/batch` — now accept **v2** pipelines (previously
+  named/v1 only, so every chat-authored pipeline 404'd as a job). v2 step
+  results map onto `pipeline_job_steps`; a step whose output carries `error`
+  marks the job failed.
+- **Pipeline storage:** seeds ship in the image (`runtime/pipelines/v2`, refreshed
+  on rebuild). Pipelines authored at runtime go to the **database**
+  (`pipelines_v2`, migration 020) when one is configured — the store of record,
+  shared by every replica and safe on ephemeral filesystems (Cloud Run). Without
+  a database they fall back to `PIPELINES_DATA_DIR` (`/data/pipelines`; a named
+  volume in compose, a PVC in k8s). Load order seeds → data dir → DB, later
+  winning. `DELETE` removes the row and/or file; shipped examples stay 409.
+
+## `runtime/router_mcp.py` — Platform Control Plane as an MCP Server
+**Status:** ✅ Working (unit + E2E + external client verified)
+**Purpose:** `POST /mcp` on the router — MCP over streamable HTTP, JSON-RPC 2.0
+(`initialize`, `ping`, `tools/list`, `tools/call`). Any MCP client — Claude
+Code, Claude Desktop, Cursor, or the built-in chat — can manage the platform:
+register/deploy MCPs, invoke tools, build/run/delete pipelines, submit and
+check jobs, manage credential *metadata* and policy, read audit, scale.
+**Language:** Python (FastAPI router, no MCP SDK dependency)
+
+**Security model — a translator, never a second authorization path.** Every
+tool forwards to the existing REST route over loopback carrying the caller's
+own headers (`X-API-Key` / `Authorization` / `X-Sealfleet-*` delegated
+identity). `_authorize_action`, tenant scoping, rate limits and audit run
+exactly as for REST; a 403 from REST surfaces as an `isError` tool result with
+the same message. **No tool returns a secret value** — `credential_use` is
+deliberately absent and listed in `FORBIDDEN_TOOLS`.
+
+**Tools (30):** `platform_status` · `mcp_list/get/tools/register/deploy/deployments`
+· `tool_invoke` · `pipeline_list/get/run/deploy/delete/reload` ·
+`job_create/get/list/cancel` · `credential_list/create/update/delete` ·
+`policy_rules/check/reload` · `audit_events` · `scale_status/up/down` ·
+`registry_export`. `mcp_deploy`/`mcp_deployments` hop to the deploy service
+(`DEPLOY_URL`).
+
+**Configuration:** `MCP_CONTROL_LOOPBACK_URL` (default `http://127.0.0.1:$APP_PORT`),
+`DEPLOY_URL`, `MCP_CONTROL_MAX_TEXT` (result cap, default 60000 chars).
+`GET /mcp` answers 405 (no server-initiated stream).
+
+**Connect Claude Code:**
+```bash
+claude mcp add --transport http sealfleet http://localhost:8040/mcp -H "X-API-Key: <operator key>"
+```
+
+## `runtime/llm-proxy/` — Single LLM Entry Point
+**Status:** ✅ Working
+**Purpose:** OpenAI-compatible front door for every LLM call the platform makes.
+Lets a tenant choose its brain — an on-box local model or a cloud provider —
+without any MCP or agent knowing the difference.
+**Language:** Node (built-ins only, no dependencies)
+**Port:** 3456
+
+**Modules:**
+- `runtime/llm-proxy/index.js` — proxy + Anthropic⇄OpenAI translation ✅
+
+**Model selection:**
+- `local/<model>` — **pinned** to `LOCAL_LLM_BASE_URL`. Never falls back to a
+  cloud backend, so the request provably cannot leave the host. This is the
+  guarantee regulated tenants (banks, health) need.
+- **Tool calling on the Anthropic path:** the Messages translation now carries
+  OpenAI `tools`/`tool_choice` → Anthropic `tools`/`input_schema`, assistant
+  `tool_calls` → `tool_use` blocks, `role:"tool"` results → `tool_result`
+  blocks (consecutive results folded into one user turn, as Anthropic
+  requires), and `tool_use` responses → `tool_calls` with
+  `finish_reason: "tool_calls"`. So the chat's platform loop works on a
+  tenant's Anthropic subscription, not only on OpenAI-compatible servers.
+  Pure-function tests: `runtime/llm-proxy/test/` (`node --test`).
+- `byo/<provider>/<model>` — **pinned** to the tenant's own provider. Also has
+  no fallback: a tenant that chose its own account must not be silently served
+  by the platform's backend. The key arrives per request in the
+  `X-Sealfleet-LLM-Key` header (resolved upstream from the credential store);
+  the proxy neither stores nor logs it. `byo/custom/...` takes its endpoint
+  from `X-Sealfleet-LLM-Base-Url`.
+- anything else — routing priority below.
+
+**Routing priority (unpinned):**
+1. Claude CLI / Anthropic OAuth → Anthropic API
+2. `AI_GATEWAY_API_KEY` → AI Gateway
+3. `ANTHROPIC_API_KEY` → Anthropic API
+4. `LOCAL_LLM_BASE_URL` → local OpenAI-compatible server
+5. 503
+
+**Configuration:**
+- `LLM_PROXY_TOKEN` — shared secret callers must present as their OpenAI
+  `api_key` (`Authorization: Bearer`). Compose sets it to the per-deployment
+  operator key; hosted sets it from Secret Manager. Unset = open (dev only —
+  an open proxy on a public ingress lets strangers spend the provider keys).
+  `/health` stays public for probes but shows backend config only to callers
+  with the token.
+- `LOCAL_LLM_BASE_URL` — any OpenAI-compatible server (NVIDIA NIM, vLLM,
+  llama.cpp, Ollama). Empty disables the local route.
+- `LOCAL_LLM_MODEL` — served model name used when the `local/` prefix carries none
+- `LOCAL_LLM_TIMEOUT_MS` — default 300000 (local models are slower to first token)
+
+**Key interfaces:**
+- `GET /health` — mode + local backend config
+- `POST /v1/chat/completions` — OpenAI-compatible
 
 ---
 

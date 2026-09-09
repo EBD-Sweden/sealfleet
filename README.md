@@ -13,7 +13,11 @@ Sealfleet lets organizations expose internal/external capabilities as agent-call
 - **runtime/** — Runtime Router: MCP server framework, tool invoke (`/call`), typed/named/v2 pipelines, async jobs, manifests, scale-to-zero, and the `mcpfinder` CLI
 - **deploy/** — Deploy service: git-to-Kubernetes MCP deployment
 - **registry/** — Discovery service + federation
-- **core-agent/** — LLM-powered agent that maps natural language to pipeline execution
+- **agent/** — Chat agent (compose/k8s service `core-agent`): natural language →
+  pipeline selection, pipeline authoring, and platform operations over the
+  router's MCP control server
+- **runtime/llm-proxy/** — Single LLM entry point (OpenAI-compatible): on-box
+  `local/…` models, tenant `byo/…` providers, and cloud fallbacks
 - **broker/** — Secrets integration + token minting + signing
 - **policy/** — Policy decision point + policy packs
 - **observability/** — OpenTelemetry wiring + audit log schema (see `docs/OBSERVABILITY.md` for receipt map, OTEL backend config, readiness, and smoke checks)
@@ -89,6 +93,91 @@ Then:
 - A **seeded local-dev operator API key** is created automatically
   (`scripts/001_create_api_keys.sql`) so agents/CLI can invoke tools and run pipelines
   out of the box — e.g. `MCPFINDER_API_KEY=<key> python -m runtime.cli status`.
+
+### Choose the brain: cloud provider or a local model
+
+Every LLM call the platform makes goes through one door — the **llm-proxy**
+(`runtime/llm-proxy/`, port 3456, OpenAI-compatible). Point it at a cloud
+provider, at a model running on your own hardware, or both.
+
+```bash
+# Cloud (any one of these is enough)
+ANTHROPIC_API_KEY=sk-ant-...  docker compose up -d
+AI_GATEWAY_API_KEY=...        docker compose up -d
+```
+
+**Local model — nothing leaves the machine.** Requests whose model name starts
+with `local/` are pinned to the on-box server and **never fall back to a cloud
+backend**, so a regulated tenant can prove its prompts did not leave the host.
+
+```bash
+# Option A: the bundled NVIDIA NIM profile (needs a GPU + NGC_API_KEY).
+#   First start builds the engine and can take 10–30 min; ~/.cache/nim makes
+#   later starts fast.
+NGC_API_KEY=... docker compose --profile local-llm up -d
+
+# Option B: bring your own OpenAI-compatible server (vLLM, llama.cpp, Ollama, …)
+LOCAL_LLM_BASE_URL=http://host.docker.internal:11434/v1 \
+LOCAL_LLM_MODEL=qwen2.5:14b \
+docker compose up -d
+```
+
+For day-to-day use copy `.env.example` to `.env` — it sets
+`COMPOSE_PROFILES=local-llm` so a plain `docker compose up -d <service>` does not
+reconcile the model away, and holds `NGC_API_KEY`. **Memory note:** the 30B NIM
+needs ~60 GB of unified memory on a GB10; it cannot share the box with a
+fine-tuning job at the same time (it gets OOM-killed, exit 137).
+
+Then pin the chat to it:
+
+```bash
+CHAT_MODEL=local/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning docker compose up -d core-agent
+curl localhost:3456/health        # shows mode + whether the local route is enabled
+```
+
+**Bring your own provider.** A tenant can point the chat at its own LLM
+account instead of the platform's. Store the key as a credential scoped with
+the reserved `llm:` prefix — it is encrypted at rest, never returned to the
+browser, and never placed in a prompt:
+
+| `assigned_mcp` | Means |
+|---|---|
+| `llm:openai` | your OpenAI account, provider default model |
+| `llm:anthropic:claude-sonnet-4-6` | your Anthropic account, a named model |
+| `llm:custom:<model>@https://your-endpoint/v1` | your own OpenAI-compatible endpoint |
+
+The credential is unwrapped **as the logged-in user** — the agent's own
+operator key is deliberately denied `credential.*`, so the chat cannot reach a
+secret the user could not reach themselves, and audit records the real person.
+Known providers: openai, anthropic, groq, mistral, together, deepseek,
+openrouter, nvidia, and `custom`.
+
+**Control the platform over MCP.** The router is itself an MCP server at
+`POST /mcp` (JSON-RPC 2.0, streamable HTTP). Point any MCP client at it and it
+can register and deploy MCPs, invoke tools, build/run pipelines, submit jobs,
+manage credential metadata and policy, and read audit — with exactly the
+permissions of the key or user it presents, and never a secret value:
+
+```bash
+claude mcp add --transport http sealfleet http://localhost:8040/mcp -H "X-API-Key: <operator key>"
+claude -p "Using the sealfleet tools, list the registered MCP servers and pipelines."
+```
+
+The built-in chat uses the same server: *"Run weather_trip_planner for Oslo as
+a background job and tell me its status"* runs a tool-calling loop over `/mcp`
+as the logged-in user.
+
+**Build pipelines from the chat.** Ask *"create a pipeline that summarizes an
+invoice and scores the vendor"* and the agent reads the MCP tool catalog
+(`GET /mcp-tools`), authors a v2 pipeline, registers it, and runs it once. The
+deploy step requires `pipeline.deploy`, checked as the logged-in user. Authored
+pipelines are stored on the `sealfleet_pipelines` volume (a PVC on k8s), so they
+survive `docker compose up --build`. `scripts/e2e-local-llm.sh` exercises the
+whole path against a running stack.
+
+Because it is plain OpenAI-compatible HTTP, a model you fine-tuned yourself
+(e.g. a LoRA served by NIM or vLLM) drops in the same way — train a domain model
+on your own data, serve it locally, and the whole platform uses it.
 
 **Connect your own IdP (Keycloak, Okta, Azure AD, Auth0, …)** in the portal under
 **Admin → Tenants** as the admin user:

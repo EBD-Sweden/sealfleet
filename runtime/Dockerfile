@@ -21,9 +21,14 @@ RUN chmod +x entrypoint.sh
 EXPOSE 8040
 
 # Run as a non-root user (defense in depth; the app only writes under /app).
+# Runtime-authored pipelines are written here (see PIPELINES_DATA_DIR in
+# router.py). Created and chowned in the image so a fresh named volume mounted
+# on it inherits appuser ownership and stays writable as non-root.
+RUN mkdir -p /data/pipelines
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser \
-    && chown -R appuser /app
+    && chown -R appuser /app /data/pipelines
 USER appuser
+ENV PIPELINES_DATA_DIR=/data/pipelines
 
 # Opt-in app-level TLS (SOC 2 CC6.7): entrypoint serves HTTPS when
 # TLS_CERT_FILE/TLS_KEY_FILE are set, otherwise plain HTTP (unchanged default).

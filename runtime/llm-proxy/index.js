@@ -7,11 +7,18 @@
  * All MCPs call http://host.k3d.internal:3456/v1 — this is the single
  * LLM entry point for the entire McpFinder platform.
  *
+ * Model selection:
+ *   model "local/..."  → PINNED to the on-box model. Never falls back to a
+ *                        cloud backend, so the request cannot leave the host.
+ *                        This is the guarantee regulated tenants need.
+ *   anything else      → the routing priority below.
+ *
  * Routing priority:
  *   1. Claude CLI / Anthropic OAuth              → Anthropic API directly (preferred)
  *   2. AI_GATEWAY_API_KEY                        → AI Gateway (fallback)
  *   3. ANTHROPIC_API_KEY (sk-ant-api...)        → Anthropic API directly (fallback)
- *   4. 503
+ *   4. LOCAL_LLM_BASE_URL                        → local OpenAI-compatible server (fallback)
+ *   5. 503
  *
  * OAuth token sources, in order:
  *   - CLAUDE_CODE_OAUTH_TOKEN
@@ -31,13 +38,78 @@ const http = require("http");
 const https = require("https");
 const url = require("url");
 
-const PORT = parseInt(process.env.LLM_PROXY_PORT || "3456", 10);
+// Cloud Run and similar inject PORT; LLM_PROXY_PORT is the explicit override.
+const PORT = parseInt(process.env.PORT || process.env.LLM_PROXY_PORT || "3456", 10);
 const ANTHROPIC_OAUTH_TOKEN = process.env.ANTHROPIC_OAUTH_TOKEN || "";
 const CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN || "";
 const CLAUDE_CODE_CREDENTIALS_PATH = process.env.CLAUDE_CODE_CREDENTIALS_PATH || path.join(os.homedir(), ".claude", ".credentials.json");
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const AI_GATEWAY_API_KEY = process.env.AI_GATEWAY_API_KEY || "";
 const GATEWAY_BASE = process.env.GATEWAY_URL || "https://ai-gateway.vercel.sh/v1";
+
+// Local, on-box model: any OpenAI-compatible server (NVIDIA NIM, vLLM,
+// llama.cpp, Ollama). Empty base URL disables the local route entirely.
+const LOCAL_LLM_BASE_URL = (process.env.LOCAL_LLM_BASE_URL || "").replace(/\/$/, "");
+const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || "";
+const LOCAL_LLM_TIMEOUT_MS = parseInt(process.env.LOCAL_LLM_TIMEOUT_MS || "300000", 10);
+const LOCAL_PREFIX = "local/";
+
+let _localProbe = { at: 0, reachable: false };
+function probeLocal() {
+  return new Promise((resolve) => {
+    if (!LOCAL_LLM_BASE_URL) return resolve(false);
+    if (Date.now() - _localProbe.at < 10000) return resolve(_localProbe.reachable);
+    const parsed = url.parse(LOCAL_LLM_BASE_URL);
+    const transport = parsed.protocol === "https:" ? https : http;
+    const req = transport.request({
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+      path: (parsed.path || "").replace(/\/$/, "") + "/models",
+      method: "GET",
+      timeout: 1500,
+    }, (res) => { res.resume(); done(res.statusCode < 500); });
+    const done = (ok) => { _localProbe = { at: Date.now(), reachable: ok }; resolve(ok); };
+    req.on("error", () => done(false));
+    req.on("timeout", () => { req.destroy(); done(false); });
+    req.end();
+  });
+}
+
+// Shared secret callers must present (Authorization: Bearer <token>, which is
+// what an OpenAI client sends as its api_key). Unset = open, for local dev
+// only: an open proxy on a public ingress lets strangers spend the platform's
+// provider keys.
+const LLM_PROXY_TOKEN = process.env.LLM_PROXY_TOKEN || "";
+
+function callerAuthorized(req) {
+  if (!LLM_PROXY_TOKEN) return true;
+  const h = req.headers["authorization"] || "";
+  const presented = h.toLowerCase().startsWith("bearer ") ? h.slice(7).trim() : (req.headers["x-api-key"] || "");
+  if (!presented || presented.length !== LLM_PROXY_TOKEN.length) return false;
+  const crypto = require("crypto");
+  return crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(LLM_PROXY_TOKEN));
+}
+
+// Bring-your-own provider: "byo/<provider>/<model>". The caller supplies the
+// key per request (resolved from the platform credential store upstream) —
+// this proxy never stores or logs it.
+const BYO_PREFIX = "byo/";
+const BYO_KEY_HEADER = "x-sealfleet-llm-key";
+const BYO_BASE_URL_HEADER = "x-sealfleet-llm-base-url";
+const BYO_TIMEOUT_MS = parseInt(process.env.BYO_LLM_TIMEOUT_MS || "90000", 10);
+
+// Known OpenAI-compatible providers. "custom" takes its base URL from the
+// request header, so a tenant can point at a private or regional endpoint.
+const BYO_PROVIDERS = {
+  openai: "https://api.openai.com/v1",
+  groq: "https://api.groq.com/openai/v1",
+  mistral: "https://api.mistral.ai/v1",
+  together: "https://api.together.xyz/v1",
+  deepseek: "https://api.deepseek.com/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+  nvidia: "https://integrate.api.nvidia.com/v1",
+  custom: "",
+};
 
 // --- Map OpenAI model names to Anthropic model IDs ---
 const MODEL_MAP = {
@@ -79,29 +151,118 @@ function getBackendMode() {
   if (oauthToken) return "anthropic-oauth";
   if (AI_GATEWAY_API_KEY) return "ai-gateway";
   if (ANTHROPIC_API_KEY) return "anthropic-api-key";
+  if (LOCAL_LLM_BASE_URL) return "local";
   return "no-backend";
+}
+
+/**
+ * Convert an OpenAI-style message list → Anthropic messages.
+ *
+ * Tool calling differs structurally: OpenAI puts calls on the assistant
+ * message (`tool_calls`) and results in `role:"tool"` messages; Anthropic puts
+ * both inside content blocks (`tool_use` on the assistant turn, `tool_result`
+ * on the following user turn). Consecutive tool results are folded into ONE
+ * user turn, which Anthropic requires.
+ */
+function toAnthropicMessages(messages) {
+  const out = [];
+  for (const m of messages) {
+    if (m.role === "system") continue;
+
+    if (m.role === "tool") {
+      const block = {
+        type: "tool_result",
+        tool_use_id: m.tool_call_id,
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
+      };
+      const last = out[out.length - 1];
+      if (last && last.role === "user" && Array.isArray(last.content) && last.content.some((b) => b.type === "tool_result")) {
+        last.content.push(block);
+      } else {
+        out.push({ role: "user", content: [block] });
+      }
+      continue;
+    }
+
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      const content = [];
+      if (m.content) content.push({ type: "text", text: String(m.content) });
+      for (const tc of m.tool_calls) {
+        let input = {};
+        try { input = JSON.parse(tc.function?.arguments || "{}"); } catch { input = {}; }
+        content.push({ type: "tool_use", id: tc.id, name: tc.function?.name, input });
+      }
+      out.push({ role: "assistant", content });
+      continue;
+    }
+
+    out.push({ role: m.role, content: m.content ?? "" });
+  }
+  return out;
+}
+
+/** OpenAI `tools` (function schema) → Anthropic `tools` (input_schema). */
+function toAnthropicTools(openAiTools) {
+  return (openAiTools || [])
+    .filter((t) => t && t.type === "function" && t.function?.name)
+    .map((t) => ({
+      name: t.function.name,
+      description: t.function.description || "",
+      input_schema: t.function.parameters || { type: "object", properties: {} },
+    }));
+}
+
+function toAnthropicToolChoice(choice) {
+  if (!choice || choice === "auto") return undefined;
+  if (choice === "none") return undefined; // handled by omitting tools
+  if (choice === "required") return { type: "any" };
+  if (typeof choice === "object" && choice.function?.name) return { type: "tool", name: choice.function.name };
+  return undefined;
 }
 
 /** Convert OpenAI chat completion request → Anthropic Messages API request */
 function toAnthropicBody(openAiBody) {
   const model = resolveAnthropicModel(openAiBody.model);
   const maxTokens = openAiBody.max_tokens || 4096;
-  const messages = (openAiBody.messages || []).filter((m) => m.role !== "system");
   const system = (openAiBody.messages || [])
     .filter((m) => m.role === "system")
-    .map((m) => m.content)
+    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
     .join("\n");
-  return {
+  const body = {
     model,
     max_tokens: maxTokens,
     ...(system ? { system } : {}),
-    messages,
+    messages: toAnthropicMessages(openAiBody.messages || []),
   };
+  if (typeof openAiBody.temperature === "number") body.temperature = openAiBody.temperature;
+
+  const tools = openAiBody.tool_choice === "none" ? [] : toAnthropicTools(openAiBody.tools);
+  if (tools.length) {
+    body.tools = tools;
+    const tc = toAnthropicToolChoice(openAiBody.tool_choice);
+    if (tc) body.tool_choice = tc;
+  }
+  return body;
 }
 
 /** Convert Anthropic Messages response → OpenAI chat completion response */
 function toOpenAiResponse(anthropicResp, originalModel) {
-  const content = anthropicResp.content?.[0]?.text || "";
+  const blocks = Array.isArray(anthropicResp.content) ? anthropicResp.content : [];
+  const text = blocks.filter((b) => b.type === "text").map((b) => b.text || "").join("");
+  const toolCalls = blocks
+    .filter((b) => b.type === "tool_use")
+    .map((b) => ({
+      id: b.id,
+      type: "function",
+      function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+    }));
+
+  const message = { role: "assistant", content: text || (toolCalls.length ? null : "") };
+  if (toolCalls.length) message.tool_calls = toolCalls;
+
+  const finishMap = { end_turn: "stop", stop_sequence: "stop", max_tokens: "length", tool_use: "tool_calls" };
+  const finish_reason = toolCalls.length ? "tool_calls" : (finishMap[anthropicResp.stop_reason] || "stop");
+
   return {
     id: anthropicResp.id || `proxy-${Date.now()}`,
     object: "chat.completion",
@@ -110,8 +271,8 @@ function toOpenAiResponse(anthropicResp, originalModel) {
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content },
-        finish_reason: anthropicResp.stop_reason || "stop",
+        message,
+        finish_reason,
       },
     ],
     usage: {
@@ -225,22 +386,160 @@ function callVercelGateway(openAiBody) {
   });
 }
 
+/**
+ * POST an OpenAI-compatible chat completion to any base URL.
+ * Shared by the local route and the bring-your-own-provider route.
+ *
+ * `label` only shapes error messages; `apiKey` is omitted for servers that
+ * don't authenticate (a local NIM/vLLM on the host network).
+ */
+function callOpenAiCompatible({ baseUrl, model, body, apiKey, timeoutMs, label }) {
+  return new Promise((resolve, reject) => {
+    if (!baseUrl) return reject(new Error(`${label}: no base URL configured`));
+
+    const parsed = url.parse(baseUrl);
+    const isHttps = parsed.protocol === "https:";
+    const transport = isHttps ? https : http;
+    const payload = Buffer.from(JSON.stringify({ ...body, model }));
+
+    const headers = {
+      "content-type": "application/json",
+      "content-length": payload.length,
+    };
+    if (apiKey) headers["authorization"] = `Bearer ${apiKey}`;
+
+    const opts = {
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: (parsed.path || "").replace(/\/$/, "") + "/chat/completions",
+      method: "POST",
+      headers,
+      timeout: timeoutMs,
+    };
+
+    const req = transport.request(opts, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const raw = Buffer.concat(chunks).toString();
+        let data;
+        try { data = JSON.parse(raw); }
+        catch {
+          // A NIM/vLLM server still building its engine answers with plain
+          // text, so surface the status and a snippet, not a bare parse error.
+          return reject(new Error(
+            `${label} HTTP ${res.statusCode} (non-JSON): ${raw.slice(0, 120)}`
+          ));
+        }
+        if ((res.statusCode || 500) >= 400) {
+          return reject(new Error(data?.error?.message || `${label} HTTP ${res.statusCode}`));
+        }
+        if (!Array.isArray(data?.choices)) {
+          return reject(new Error(`${label} response missing choices`));
+        }
+        resolve(data);
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error(`${label} timeout`)); });
+    req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Forward to a tenant's own provider.
+ *
+ * Anthropic is not OpenAI-compatible, so it reuses the Messages translation
+ * already in this file; everything else is a straight passthrough.
+ */
+function callByo(openAiBody, providerKey, model, apiKey, customBaseUrl) {
+  if (!apiKey) {
+    return Promise.reject(new Error("no API key supplied for the selected provider"));
+  }
+  if (providerKey === "anthropic") {
+    return callAnthropicDirect({ ...openAiBody, model }, apiKey, false);
+  }
+
+  const baseUrl = providerKey === "custom"
+    ? customBaseUrl
+    : BYO_PROVIDERS[providerKey];
+  if (!baseUrl) {
+    return Promise.reject(new Error(
+      providerKey === "custom"
+        ? `custom provider needs a ${BYO_BASE_URL_HEADER} header`
+        : `unknown provider "${providerKey}"`
+    ));
+  }
+
+  return callOpenAiCompatible({
+    baseUrl,
+    model,
+    body: openAiBody,
+    apiKey,
+    timeoutMs: BYO_TIMEOUT_MS,
+    label: `Provider ${providerKey}`,
+  });
+}
+
+/** Forward request to a local OpenAI-compatible server (NIM / vLLM / llama.cpp / Ollama) */
+function callLocal(openAiBody) {
+  if (!LOCAL_LLM_BASE_URL) return Promise.reject(new Error("LOCAL_LLM_BASE_URL not set"));
+
+  // Pinned requests name the local model directly (minus the marker). Unpinned
+  // ones arrive here as a fallback still carrying a cloud model name the local
+  // server has never heard of, so serve them with the model it actually has.
+  let model = openAiBody.model || "";
+  if (model.startsWith(LOCAL_PREFIX)) {
+    model = model.slice(LOCAL_PREFIX.length) || LOCAL_LLM_MODEL;
+  } else {
+    model = LOCAL_LLM_MODEL || model;
+  }
+
+  return callOpenAiCompatible({
+    baseUrl: LOCAL_LLM_BASE_URL,
+    model,
+    body: openAiBody,
+    timeoutMs: LOCAL_LLM_TIMEOUT_MS,
+    label: "Local LLM",
+  });
+}
+
 // --- HTTP server ---
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const sendJson = (code, obj) => {
     const body = JSON.stringify(obj);
     res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
     res.end(body);
   };
 
-  // Health
+  // Reachability of the configured local backend, cached briefly. `enabled`
+  // stays "configured"; `reachable` says whether anything answers — so a
+  // compose stack without the local-llm profile doesn't advertise (and the
+  // chat doesn't auto-select) a brain that cannot exist.
   if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
-    return sendJson(200, { status: "ok", service: "llm-proxy", mode: getBackendMode(), port: PORT });
+    return sendJson(200, {
+      status: "ok",
+      service: "llm-proxy",
+      mode: getBackendMode(),
+      port: PORT,
+      auth: LLM_PROXY_TOKEN ? "token" : "open",
+      ...(callerAuthorized(req) ? {
+        local: LOCAL_LLM_BASE_URL
+          ? { enabled: true, base_url: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL,
+              reachable: await probeLocal() }
+          : { enabled: false, reachable: false },
+        byo: { providers: Object.keys(BYO_PROVIDERS).concat("anthropic").sort() },
+      } : {}),
+    });
   }
 
   if (!req.url.includes("chat/completions")) {
     return sendJson(404, { error: { message: `Not found: ${req.url}` } });
+  }
+  if (!callerAuthorized(req)) {
+    return sendJson(401, { error: { message: "Unauthorized: set LLM_PROXY_TOKEN as the client api_key" } });
   }
 
   const chunks = [];
@@ -253,6 +552,56 @@ const server = http.createServer((req, res) => {
     const model = body.model || "anthropic/claude-haiku-4-5";
     console.log(`[llm-proxy] ${new Date().toISOString()} model=${model}`);
 
+    // Route 0a: a tenant's own provider, pinned with "byo/<provider>/<model>".
+    // Like the local pin this has NO fallback: a tenant that chose its own
+    // provider must not be silently served by the platform's backend instead.
+    if (model.startsWith(BYO_PREFIX)) {
+      const rest = model.slice(BYO_PREFIX.length);
+      const slash = rest.indexOf("/");
+      const providerKey = (slash === -1 ? rest : rest.slice(0, slash)).toLowerCase();
+      const providerModel = slash === -1 ? "" : rest.slice(slash + 1);
+
+      if (!providerModel) {
+        return sendJson(400, { error: { message: `Model must be "${BYO_PREFIX}<provider>/<model>"` } });
+      }
+      try {
+        const result = await callByo(
+          body,
+          providerKey,
+          providerModel,
+          req.headers[BYO_KEY_HEADER],
+          req.headers[BYO_BASE_URL_HEADER],
+        );
+        console.log(`[llm-proxy] OK via byo:${providerKey}`);
+        return sendJson(200, result);
+      } catch (err) {
+        // Never echo the request back — it may carry the tenant's key header.
+        console.error(`[llm-proxy] byo:${providerKey} failed: ${err.message}`);
+        return sendJson(502, { error: { message: `Provider request failed: ${err.message}` } });
+      }
+    }
+
+    // Route 0b: model pinned to the on-box server with a "local/" prefix.
+    // Deliberately has NO fallback — a tenant that pins local must never have
+    // its prompt silently sent to a cloud provider because the box was busy.
+    if (model.startsWith(LOCAL_PREFIX)) {
+      if (!LOCAL_LLM_BASE_URL) {
+        return sendJson(503, { error: { message: "Local LLM requested but LOCAL_LLM_BASE_URL is not configured" } });
+      }
+      try {
+        const result = await callLocal(body);
+        console.log(`[llm-proxy] OK via local (pinned)`);
+        return sendJson(200, result);
+      } catch (err) {
+        console.error(`[llm-proxy] local (pinned) failed: ${err.message}`);
+        return sendJson(502, { error: { message: `Local LLM unavailable: ${err.message}` } });
+      }
+    }
+
+    // Every failed route records why, so the final error is truthful rather
+    // than "no backend configured" when backends exist but all refused.
+    let lastError = null;
+
     // Route 1: Claude CLI / Anthropic OAuth (preferred)
     const oauthToken = getAnthropicOauthToken();
     if (oauthToken) {
@@ -261,6 +610,7 @@ const server = http.createServer((req, res) => {
         console.log(`[llm-proxy] OK via ${getBackendMode()}`);
         return sendJson(200, result);
       } catch (err) {
+        lastError = err;
         console.warn(`[llm-proxy] ${getBackendMode()} failed: ${err.message} — trying next`);
       }
     }
@@ -272,6 +622,7 @@ const server = http.createServer((req, res) => {
         console.log(`[llm-proxy] OK via ai-gateway`);
         return sendJson(200, result);
       } catch (err) {
+        lastError = err;
         console.warn(`[llm-proxy] ai-gateway failed: ${err.message} — trying next`);
       }
     }
@@ -283,18 +634,36 @@ const server = http.createServer((req, res) => {
         console.log(`[llm-proxy] OK via anthropic-api-key`);
         return sendJson(200, result);
       } catch (err) {
-        console.error(`[llm-proxy] all backends failed. Last: ${err.message}`);
-        return sendJson(502, { error: { message: `LLM unavailable: ${err.message}` } });
+        lastError = err;
+        console.warn(`[llm-proxy] anthropic-api-key failed: ${err.message} — trying next`);
       }
     }
 
+    // Route 4: local on-box model (last resort for unpinned requests)
+    if (LOCAL_LLM_BASE_URL) {
+      try {
+        const result = await callLocal(body);
+        console.log(`[llm-proxy] OK via local (fallback)`);
+        return sendJson(200, result);
+      } catch (err) {
+        lastError = err;
+        console.warn(`[llm-proxy] local failed: ${err.message}`);
+      }
+    }
+
+    if (lastError) {
+      console.error(`[llm-proxy] all backends failed. Last: ${lastError.message}`);
+      return sendJson(502, { error: { message: `LLM unavailable: ${lastError.message}` } });
+    }
     return sendJson(503, { error: { message: "No LLM backend configured" } });
   });
 
   req.on("error", (err) => sendJson(400, { error: { message: err.message } }));
 });
 
-server.listen(PORT, "0.0.0.0", () => {
+module.exports = { toAnthropicBody, toAnthropicMessages, toAnthropicTools, toOpenAiResponse, resolveAnthropicModel, callerAuthorized };
+
+if (require.main === module) server.listen(PORT, "0.0.0.0", () => {
   const mode = getBackendMode();
   console.log(`[llm-proxy] Listening on 0.0.0.0:${PORT}`);
   console.log(`[llm-proxy] Mode: ${mode}`);

@@ -100,6 +100,46 @@ Prod-leaning defaults already set: `router.requireAuth=true`,
 
 See `values.yaml` for the full set (per-service replicas/resources, etc.).
 
+## The chat's shared key (`secrets.runtimeApiKey`)
+
+The portal, chat agent and llm-proxy share one operator key. Set
+`secrets.runtimeApiKey` (or put `RUNTIME_API_KEY` in your existing secret),
+then register it so the router accepts it — with delegation, so chat calls are
+attributed to the real user:
+
+```sql
+INSERT INTO api_keys (api_key, tenant_id, name, is_active, action_permissions, allow_identity_delegation)
+VALUES ('<runtimeApiKey>', 'default', 'Chart portal/agent key', true,
+        ARRAY['pipeline.invoke','agent.invoke','agent.register','mcp.server.register','registry.export','registry.import'], true)
+ON CONFLICT (api_key) DO UPDATE SET is_active = true;
+```
+
+The key deliberately excludes `credential.*`; the chat resolves tenant LLM
+credentials as the logged-in user. Non-admin users additionally need
+`mcp_permissions` grants for the MCPs a pipeline touches (fail-closed RBAC).
+
+## Runtime-authored pipelines (`router.persistence`)
+
+Pipelines created at runtime — from the portal chat ("create a pipeline that…")
+or `POST /v2/pipelines/deploy` — are written to a PVC mounted at
+`router.persistence.mountPath` (`/data/pipelines`) and survive pod restarts and
+image upgrades. The example pipelines shipped in the image are unaffected.
+
+Pipelines are stored as files, so with `router.replicas > 1` every replica must
+mount the same volume: set `router.persistence.accessMode: ReadWriteMany` on a
+storage class that supports it (NFS, EFS, Filestore, …), or run one replica.
+With a `ReadWriteOnce` claim and several replicas, a pipeline authored on one
+replica is not visible to the others.
+
+```yaml
+router:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 256Mi
+    accessMode: ReadWriteOnce
+```
+
 ## The migrate Job
 
 Runs as a `post-install,post-upgrade` Helm hook. An init container clones

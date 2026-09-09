@@ -12,7 +12,7 @@ Required Secret objects and keys:
 | `mcpfinder-runtime-auth` | `NEXTAUTH_SECRET`, `ENCRYPTION_KEY` | router |
 | `mcpfinder-portal-auth` | `NEXTAUTH_SECRET` | portal |
 | `mcpfinder-llm` | `LLM_API_KEY` | router planner integration |
-| `mcpfinder-core-agent` | `OPENAI_API_KEY` | core-agent |
+| `mcpfinder-core-agent` | `OPENAI_API_KEY`, `ROUTER_API_KEY` | core-agent — `ROUTER_API_KEY` is the operator key it presents to the REQUIRE_AUTH router; `AGENT_API_KEY` (what callers of the agent must present) defaults to it. `OPENAI_API_KEY` must equal the llm-proxy's `LLM_PROXY_TOKEN`. Without `ROUTER_API_KEY` the chat 401s against the router AND the agent's own caller gate is disabled. |
 | `mcpfinder-anthropic` | `ANTHROPIC_API_KEY` | core agent / LLM-backed MCPs |
 | `mcpfinder-example` | `EXAMPLE_URL` | an example MCP |
 

@@ -38,3 +38,30 @@ def test_score_fake_vendor_is_deterministic_and_bounded():
         "tier": "demo-medium",
         "risk_hint_used": True,
     }
+
+
+# --- tool catalog contract ---------------------------------------------------
+# Agents that author pipelines read /tools (through the router's /mcp-tools) to
+# learn argument names, so the catalog must match the function signatures.
+
+def test_tools_catalog_names_every_accepted_argument():
+    import inspect
+    from fastapi.testclient import TestClient
+    from mcps.demo_sandbox.main import app, score_fake_vendor, summarize_fake_invoice
+
+    catalog = {t["name"]: t for t in TestClient(app).get("/tools").json()}
+    for fn in (summarize_fake_invoice, score_fake_vendor):
+        declared = set(catalog[fn.__name__]["inputs"])
+        assert declared == set(inspect.signature(fn).parameters), fn.__name__
+
+
+def test_call_with_unknown_argument_is_a_400_not_a_crash():
+    from fastapi.testclient import TestClient
+    from mcps.demo_sandbox.main import app
+
+    r = TestClient(app).post("/call", json={
+        "tool": "summarize_fake_invoice",
+        "inputs": {"invoice_id": "x", "amount_usd": 1, "vendor_name": "v", "country": "SE"},
+    })
+    assert r.status_code == 400
+    assert "country" in r.json()["detail"]

@@ -189,3 +189,31 @@ variable "license_key" {
   default     = ""
   sensitive   = true
 }
+
+# ---------------------------------------------------------------------------
+# Chat (core-agent + llm-proxy)
+# ---------------------------------------------------------------------------
+variable "runtime_api_key" {
+  description = <<-EOT
+    Operator API key shared by the portal, the chat agent and the llm-proxy.
+    Generated when empty. After apply, register it in the database so the
+    router accepts it (see README: it needs allow_identity_delegation so chat
+    calls are attributed to the real user).
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "anthropic_api_key" {
+  description = "Optional platform-level Anthropic key for the chat's default brain. Tenants may also bring their own (llm:anthropic credentials)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "chat_model" {
+  description = "Model the chat plans with by default (routed by the llm-proxy)."
+  type        = string
+  default     = "anthropic/claude-sonnet-4-6"
+}

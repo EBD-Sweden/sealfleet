@@ -27,11 +27,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 import httpx
 import yaml
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
@@ -2602,6 +2602,27 @@ def _permission_set_allows(permissions: set[str] | None, action: str) -> bool:
     return f"{prefix}.*" in permissions
 
 
+def _db_user_is_platform_admin(user_id: str) -> bool:
+    """True if user_id is an active platform admin, per the users table."""
+    if not user_id:
+        return False
+    conn = _get_db()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM users WHERE id::text = %s AND is_admin = TRUE AND is_active = TRUE LIMIT 1",
+            (user_id,),
+        )
+        found = cur.fetchone() is not None
+        cur.close()
+        return found
+    except Exception as e:
+        print(f"[auth] platform-admin lookup failed: {e}")
+        return False
+
+
 def _db_has_action_permission(tenant_id: str, user_id: str, groups: list[str], action: str) -> bool:
     """Check direct, role, and SCIM/IdP group-derived action grants."""
     conn = _get_db()
@@ -2700,6 +2721,16 @@ def _authorize_action(request: Request, action: str) -> None:
     if _db_has_action_permission(tenant_id, str(user_id), groups, action):
         _remember_authorized_action(request, action)
         return
+
+    # Platform admins acting through a delegating API key (the portal) never
+    # carry a JWT is_admin claim, so it must come from the DB — the same reason
+    # _mcp_access re-checks the users table. Gated on `delegated_from`, which is
+    # set only for keys with allow_identity_delegation, so a bare API key cannot
+    # escalate by inventing an X-Sealfleet-User-Id header.
+    if (identity or {}).get("delegated_from") and _db_user_is_platform_admin(str(user_id)):
+        _remember_authorized_action(request, action)
+        return
+
     raise HTTPException(status_code=403, detail=f"Forbidden: missing permission {action}")
 
 
@@ -3060,6 +3091,47 @@ async def list_manifests(request: Request):
         for name, m in manifests.items()
         if _registry_item_visible("manifest", name, tenant_id)
     ]
+
+
+@app.get("/mcp-tools")
+async def list_mcp_tools(request: Request):
+    """Every callable MCP tool with its input description, for pipeline authoring.
+
+    A manifest lists tool *names* only; the input shape lives on the MCP itself.
+    An agent building a pipeline needs both, and reaching each MCP directly is
+    not open to it (network policy, and it holds no MCP credentials), so the
+    router aggregates. Unreachable MCPs are reported, not fatal.
+    """
+    tenant_id = get_tenant_id(request)
+    visible = [
+        m for name, m in manifests.items()
+        if _registry_item_visible("manifest", name, tenant_id)
+    ]
+
+    def _normalize(payload) -> list[dict]:
+        """MCP servers disagree on this shape: some return {"tools": [...]},
+        others a bare list. Accept both, and keep only named entries."""
+        raw = payload.get("tools", []) if isinstance(payload, dict) else payload
+        if not isinstance(raw, list):
+            return []
+        return [t for t in raw if isinstance(t, dict) and t.get("name")]
+
+    async def _fetch(m) -> dict:
+        entry = {"mcp": m.name, "endpoint": m.endpoint, "tools": []}
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{m.endpoint.rstrip('/')}/tools")
+                resp.raise_for_status()
+                entry["tools"] = _normalize(resp.json())
+        except Exception as e:
+            entry["warning"] = f"schema unavailable: {type(e).__name__}"
+        if not entry["tools"]:
+            # Names from the manifest are still useful without an input schema.
+            entry["tools"] = [{"name": t} for t in (m.tools or [])]
+        return entry
+
+    results = await asyncio.gather(*(_fetch(m) for m in visible), return_exceptions=True)
+    return {"mcps": [r for r in results if isinstance(r, dict)]}
 
 
 @app.get("/manifests/{name}")
@@ -4395,6 +4467,32 @@ def _pipeline_uses_external_agent(pipeline: NamedPipeline) -> bool:
     return any(manifests.get(stage.mcp) and manifests[stage.mcp].transport == "external_agent" for stage in pipeline.stages)
 
 
+def _v2_uses_external_agent(pipeline_def: dict) -> bool:
+    return any(
+        manifests.get(step.get("mcp")) and manifests[step["mcp"]].transport == "external_agent"
+        for step in pipeline_def.get("steps", [])
+    )
+
+
+def _resolve_job_pipeline(name: str, tenant_id: str = "") -> tuple[str, Any]:
+    """Jobs run either engine: ("named", NamedPipeline) or ("v2", dict).
+
+    Background jobs previously only knew named (v1) pipelines, so every v2
+    pipeline — including everything authored from chat — answered 404 here.
+    v2 resolution is tenant-scoped like the run endpoint.
+    """
+    if name in named_pipelines:
+        return "named", named_pipelines[name]
+    v2 = _resolve_v2_pipeline(name, tenant_id)
+    if v2 is not None:
+        return "v2", v2
+    raise HTTPException(404, f"Pipeline '{name}' not found")
+
+
+def _job_pipeline_needs_agent_invoke(kind: str, pipeline: Any) -> bool:
+    return _pipeline_uses_external_agent(pipeline) if kind == "named" else _v2_uses_external_agent(pipeline)
+
+
 def _authorized_actions_for_background(request: Request) -> set[str]:
     """Capture request action grants to replay inside background job execution."""
     if getattr(request.state, "auth_type", "") == "none" or getattr(request.state, "is_admin", False):
@@ -4436,6 +4534,53 @@ def _job_tenant_id(request: Request, requested_tenant_id: str) -> str:
 _running_jobs: dict[str, asyncio.Task] = {}  # job_id → asyncio.Task
 
 
+async def _execute_v2_job(
+    job_id: str, pipeline_def: dict, inputs: dict, tenant_id: str, subject_id: str | None,
+    auth_headers: dict | None = None,
+) -> None:
+    """Run a v2 pipeline as a background job, recording per-step rows.
+
+    v2 results are a map of step id → {output, duration_ms, mcp, tool}; a
+    failed step carries {"error": ...} in its output and the run still
+    returns normally, so status is derived from the step outputs.
+    """
+    steps = pipeline_def.get("steps", [])
+    for i, step in enumerate(steps):
+        _job_db_write(
+            """INSERT INTO pipeline_job_steps
+               (step_id, job_id, step_name, status, inputs, sequence_order)
+               VALUES (%s, %s, %s, 'queued', %s, %s)""",
+            (f"{job_id}_s{i}", job_id, str(step.get("id", f"step_{i}")), json.dumps({}), i),
+        )
+
+    result = await _run_v2_pipeline(
+        pipeline_def, inputs, tenant_id=tenant_id, subject_id=subject_id or tenant_id,
+        auth_headers=auth_headers or {},
+    )
+
+    results = result.get("results") or {}
+    has_error = False
+    for i, step in enumerate(steps):
+        r = results.get(str(step.get("id", f"step_{i}"))) or {}
+        output = r.get("output") if isinstance(r, dict) else None
+        error = output.get("error") if isinstance(output, dict) else None
+        if error:
+            has_error = True
+        _job_db_write(
+            """UPDATE pipeline_job_steps
+               SET status=%s, result=%s, error=%s, completed_at=NOW()
+               WHERE step_id=%s""",
+            ("failed" if error else "completed", json.dumps(output, default=str),
+             (str(error) if error else None), f"{job_id}_s{i}"),
+        )
+
+    _job_db_write(
+        "UPDATE pipeline_jobs SET status=%s, result=%s, error=%s, completed_at=NOW() WHERE job_id=%s",
+        ("failed" if has_error else "completed", json.dumps(result, default=str),
+         ("one or more steps failed" if has_error else None), job_id),
+    )
+
+
 async def _execute_job(
     job_id: str,
     pipeline_name: str,
@@ -4443,6 +4588,8 @@ async def _execute_job(
     tenant_id: str,
     subject_id: str | None = None,
     authorized_actions: set[str] | None = None,
+    auth_headers: dict | None = None,
+    v2_def: dict | None = None,
 ):
     """Run a single pipeline job in the background, recording steps."""
 
@@ -4453,6 +4600,13 @@ async def _execute_job(
         )
 
         pipeline = named_pipelines.get(pipeline_name)
+        v2_def = v2_def or v2_pipelines.get(pipeline_name)
+        if not pipeline and v2_def:
+            await _execute_v2_job(
+                job_id, v2_def, inputs, tenant_id, subject_id,
+                auth_headers=auth_headers,
+            )
+            return
         if not pipeline:
             _job_db_write(
                 "UPDATE pipeline_jobs SET status='failed', error=%s, completed_at=NOW() WHERE job_id=%s",
@@ -4599,10 +4753,8 @@ async def create_job(req: CreateJobRequest, request: Request):
     job_id = uuid.uuid4().hex[:16]
     name = req.name or f"{req.pipeline}_{job_id[:8]}"
 
-    if req.pipeline not in named_pipelines:
-        raise HTTPException(404, f"Pipeline '{req.pipeline}' not found")
-    pipeline = named_pipelines[req.pipeline]
-    if _pipeline_uses_external_agent(pipeline):
+    kind, pipeline = _resolve_job_pipeline(req.pipeline, get_tenant_id(request))
+    if _job_pipeline_needs_agent_invoke(kind, pipeline):
         _authorize_action(request, "agent.invoke")
     tenant_id = _job_tenant_id(request, req.tenant_id)
     subject_id = get_subject_id(request)
@@ -4615,6 +4767,14 @@ async def create_job(req: CreateJobRequest, request: Request):
         (job_id, name, req.pipeline, json.dumps(req.inputs), tenant_id),
     )
 
+    # Nested `pipeline:` steps re-enter over loopback and must pass
+    # REQUIRE_AUTH as the creator did. Held in memory for the task only.
+    job_auth_headers: dict = {}
+    if request.headers.get("x-api-key"):
+        job_auth_headers["X-API-Key"] = request.headers["x-api-key"]
+    if request.headers.get("authorization"):
+        job_auth_headers["Authorization"] = request.headers["authorization"]
+
     task = asyncio.create_task(
         _execute_job(
             job_id,
@@ -4623,6 +4783,8 @@ async def create_job(req: CreateJobRequest, request: Request):
             tenant_id,
             subject_id=subject_id,
             authorized_actions=authorized_actions,
+            auth_headers=job_auth_headers,
+            v2_def=pipeline if kind == "v2" else None,
         )
     )
     _running_jobs[job_id] = task
@@ -4716,12 +4878,10 @@ async def cancel_job(job_id: str, request: Request):
 async def create_batch_job(req: BatchJobRequest, request: Request):
     """Create a batch job: one parent + N child jobs."""
     _authorize_action(request, "pipeline.invoke")
-    if req.pipeline not in named_pipelines:
-        raise HTTPException(404, f"Pipeline '{req.pipeline}' not found")
+    kind, pipeline = _resolve_job_pipeline(req.pipeline, get_tenant_id(request))
     if not req.items:
         raise HTTPException(400, "items list is empty")
-    pipeline = named_pipelines[req.pipeline]
-    if _pipeline_uses_external_agent(pipeline):
+    if _job_pipeline_needs_agent_invoke(kind, pipeline):
         _authorize_action(request, "agent.invoke")
     tenant_id = _job_tenant_id(request, req.tenant_id)
     subject_id = get_subject_id(request)
@@ -4896,13 +5056,136 @@ def _enforce_demo_sandbox_boundary(
     return None
 
 
+# Pipelines live in two places:
+#   seed dir — shipped in the image (runtime/pipelines/v2). Read-only in spirit;
+#              updated by rebuilding the image.
+#   data dir — PIPELINES_DATA_DIR, a mounted volume. Where pipelines authored at
+#              runtime (chat, /v2/pipelines/deploy) are written so they survive
+#              container recreation. Unset → falls back to the seed dir (dev,
+#              tests), which is the pre-existing behaviour.
+_V2_SEED_DIR = (Path(__file__).parent / "pipelines" / "v2").resolve()
+
+
+def _v2_data_dir() -> Path:
+    configured = os.environ.get("PIPELINES_DATA_DIR", "").strip()
+    return Path(configured).resolve() if configured else _V2_SEED_DIR
+
+
+def _v2_pipeline_dirs() -> list[Path]:
+    """Seed first, data second, so a runtime-authored pipeline can override a
+    shipped one of the same name."""
+    data = _v2_data_dir()
+    return [_V2_SEED_DIR] if data == _V2_SEED_DIR else [_V2_SEED_DIR, data]
+
+
+# Runtime-authored pipelines from the database, keyed (tenant_id, name).
+# tenant_id '' = global (legacy rows / single-tenant deployments). Seeds and
+# data-dir files stay in the name-keyed v2_pipelines dict; tenant rows live
+# here so one tenant can neither see nor shadow another's pipelines.
+v2_db_pipelines: dict[tuple[str, str], dict] = {}
+
+
+def _db_load_v2_pipelines() -> dict[tuple[str, str], dict]:
+    """Empty when there is no DB or no table yet."""
+    conn = _get_db()
+    if not conn:
+        return {}
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(tenant_id, ''), name, definition FROM pipelines_v2 ORDER BY name")
+        rows = cur.fetchall()
+        cur.close()
+    except Exception as e:
+        # Table may not exist on an older schema; the file dirs still work.
+        print(f"[router] v2 pipeline DB load skipped: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {}
+    out: dict[tuple[str, str], dict] = {}
+    for tenant_id, name, definition in rows:
+        data = definition if isinstance(definition, dict) else json.loads(definition)
+        if isinstance(data, dict) and not _validate_v2_pipeline(data):
+            out[(str(tenant_id), str(name))] = data
+    return out
+
+
+def _resolve_v2_pipeline(name: str, tenant_id: str) -> dict | None:
+    """The caller's own pipeline wins over a global/seed one of the same name."""
+    return (
+        v2_db_pipelines.get((tenant_id, name))
+        or v2_db_pipelines.get(("", name))
+        or v2_pipelines.get(name)
+    )
+
+
+def _v2_visible_items(tenant_id: str) -> dict[str, dict]:
+    merged = dict(v2_pipelines)
+    for (t, name), data in v2_db_pipelines.items():
+        if t in ("", tenant_id):
+            merged[name] = data
+    return merged
+
+
+def _db_upsert_v2_pipeline(data: dict, *, tenant_id: str = "", created_by: str = "") -> bool:
+    conn = _get_db()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO pipelines_v2 (name, definition, tenant_id, created_by)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (tenant_id, name) DO UPDATE
+                 SET definition = EXCLUDED.definition, updated_at = NOW()""",
+            (data["name"], json.dumps(data, default=str), tenant_id or "", created_by or None),
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"[router] v2 pipeline DB upsert failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def _db_delete_v2_pipeline(name: str, tenant_id: str) -> bool:
+    conn = _get_db()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM pipelines_v2 WHERE name = %s AND COALESCE(tenant_id,'') = %s",
+                    (name, tenant_id))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return deleted
+    except Exception as e:
+        print(f"[router] v2 pipeline DB delete failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
 def _load_yaml_pipeline_v2():
-    """Scan runtime/pipelines/v2/ for YAML pipeline definitions and load them."""
-    v2_dir = Path(__file__).parent / "pipelines" / "v2"
-    if not v2_dir.exists():
-        return
+    """Load v2 pipelines: seed dir, then data dir, then the database.
+
+    Later sources override earlier ones of the same name, so a runtime-authored
+    pipeline in the DB wins over a file, which wins over a shipped example.
+    """
+    files: list[Path] = []
+    for d in _v2_pipeline_dirs():
+        if d.exists():
+            files.extend(sorted(d.glob("*.yaml")))
     count = 0
-    for yaml_file in sorted(v2_dir.glob("*.yaml")):
+    for yaml_file in files:
         try:
             data = yaml.safe_load(yaml_file.read_text())
             if not data or not isinstance(data, dict):
@@ -4916,6 +5199,11 @@ def _load_yaml_pipeline_v2():
             print(f"[router] loaded v2 pipeline: {data['name']} from {yaml_file}")
         except Exception as e:
             print(f"[router] WARN: failed to load v2 pipeline {yaml_file}: {e}")
+    v2_db_pipelines.clear()
+    v2_db_pipelines.update(_db_load_v2_pipelines())
+    count += len(v2_db_pipelines)
+    for (t, name) in v2_db_pipelines:
+        print(f"[router] loaded v2 pipeline: {name} from database (tenant {t or 'global'})")
     print(f"[router] loaded {count} v2 pipelines")
 
 
@@ -5024,6 +5312,10 @@ async def _run_v2_pipeline(
             step_results[step_id] = {
                 "output": step_output,
                 "duration_ms": int((time.time() - step_start) * 1000),
+                # Which capability actually ran. Callers (and the audit trail)
+                # need this to show the resolved chain, not just step ids.
+                **({"mcp": step["mcp"], "tool": step["tool"]} if step.get("mcp") else {}),
+                **({"pipeline": step["pipeline"]} if step.get("pipeline") else {}),
             }
             context["steps"][step_id] = {"output": step_output}
 
@@ -5068,19 +5360,57 @@ async def _v2_call_pipeline(
 
 # ---- V2 Pipeline Endpoints ------------------------------------------------
 
+def _v2_input_schema(pipeline: dict) -> dict:
+    """JSON-Schema view of a v2 pipeline's inputs, for MCP-style tool listings.
+
+    An input is required only when it declares no default. Types are mapped from
+    the YAML's loose names onto JSON Schema.
+    """
+    type_map = {
+        "string": "string", "str": "string", "text": "string",
+        "number": "number", "float": "number", "int": "integer", "integer": "integer",
+        "bool": "boolean", "boolean": "boolean",
+        "list": "array", "array": "array",
+        "dict": "object", "object": "object",
+    }
+    properties, required = {}, []
+    for name, spec in (pipeline.get("inputs") or {}).items():
+        spec = spec if isinstance(spec, dict) else {}
+        prop = {"type": type_map.get(str(spec.get("type", "string")).lower(), "string")}
+        if spec.get("description"):
+            prop["description"] = spec["description"]
+        if "default" in spec:
+            prop["default"] = spec["default"]
+        else:
+            required.append(name)
+        properties[name] = prop
+    return {"type": "object", "properties": properties, "required": required}
+
+
 @app.get("/v2/pipelines")
-async def list_v2_pipelines():
-    """List all loaded v2 pipelines."""
+async def list_v2_pipelines(request: Request):
+    """List v2 pipelines visible to the caller's tenant."""
+    visible = _v2_visible_items(get_tenant_id(request))
     return {
         "pipelines": [
             {
                 "name": p["name"],
                 "version": p.get("version", 2),
-                "description": p.get("description", ""),
+                # Agents select tools by description; when a pipeline omits one,
+                # fall back to what it declares it produces so it stays selectable.
+                "description": p.get("description")
+                    or (
+                        "Produces: " + ", ".join(f"{k} ({v})" for k, v in p["expected_output"].items())
+                        if isinstance(p.get("expected_output"), dict) and p["expected_output"]
+                        else ""
+                    ),
                 "inputs": list(p.get("inputs", {}).keys()),
+                # Full JSON Schema so agents can build a tool call without a
+                # second round-trip per pipeline.
+                "input_schema": _v2_input_schema(p),
                 "steps": len(p.get("steps", [])),
             }
-            for p in v2_pipelines.values()
+            for p in visible.values()
         ]
     }
 
@@ -5093,8 +5423,10 @@ async def run_v2_pipeline(request: Request):
     """
     body = await request.json()
     pipeline_name = body.get("pipeline")
-    if not pipeline_name or pipeline_name not in v2_pipelines:
-        available = list(v2_pipelines.keys())
+    caller_tenant = get_tenant_id(request)
+    pipeline_def = _resolve_v2_pipeline(pipeline_name, caller_tenant) if pipeline_name else None
+    if not pipeline_def:
+        available = sorted(_v2_visible_items(caller_tenant).keys())
         raise HTTPException(status_code=404, detail=f"V2 pipeline '{pipeline_name}' not found. Available: {available}")
     inputs = body.get("inputs", {})
     body_size_bytes = int(request.headers.get("content-length") or 0)
@@ -5102,7 +5434,7 @@ async def run_v2_pipeline(request: Request):
     # Pre-check MCP permissions for user identities (JWT or delegated API key).
     # Nested pipeline-call steps re-enter through their own run endpoint, which
     # performs the same enforcement with the forwarded credential.
-    for step in v2_pipelines[pipeline_name].get("steps", []):
+    for step in pipeline_def.get("steps", []):
         if step.get("mcp"):
             _enforce_user_mcp_access(request, step["mcp"], step.get("tool"))
 
@@ -5114,7 +5446,7 @@ async def run_v2_pipeline(request: Request):
     if request.headers.get("authorization"):
         auth_headers["Authorization"] = request.headers["authorization"]
     result = await _run_v2_pipeline(
-        v2_pipelines[pipeline_name],
+        pipeline_def,
         inputs,
         tenant_id=get_tenant_id(request),
         workspace_id=get_workspace_id(request) or str(body.get("workspace") or inputs.get("workspace") or ""),
@@ -5160,26 +5492,87 @@ async def deploy_v2_pipeline(request: Request):
     if not isinstance(name, str) or not _PIPELINE_NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="pipeline name must match ^[A-Za-z0-9_-]{1,128}$")
 
-    v2_dir = (Path(__file__).parent / "pipelines" / "v2").resolve()
-    v2_dir.mkdir(parents=True, exist_ok=True)
-    dest = (v2_dir / f"{name}.yaml").resolve()
-    # Defense in depth: the resolved path must stay inside the pipelines dir.
-    if dest.parent != v2_dir:
+    # A deploy under a shipped example's name would shadow it from the data dir
+    # (see _v2_pipeline_dirs). That is occasionally intended — a tenant tuning
+    # an example — but never by accident (an agent re-deploying what it just
+    # read), so it must be asked for explicitly.
+    if (_V2_SEED_DIR / f"{name}.yaml").exists() and not body.get("replace"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{name}' is a shipped example pipeline; pass \"replace\": true to override it",
+        )
+
+    caller_tenant = get_tenant_id(request)
+    stored_in_db = _db_upsert_v2_pipeline(
+        data, tenant_id=caller_tenant, created_by=str(get_subject_id(request) or ""),
+    )
+    location: str
+    if stored_in_db:
+        location = "database"
+    else:
+        v2_dir = _v2_data_dir()
+        v2_dir.mkdir(parents=True, exist_ok=True)
+        dest = (v2_dir / f"{name}.yaml").resolve()
+        # Defense in depth: the resolved path must stay inside the pipelines dir.
+        if dest.parent != v2_dir:
+            raise HTTPException(status_code=400, detail="invalid pipeline name")
+        dest.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+        location = str(dest)
+
+    # Register in memory, under the caller's tenant when DB-backed.
+    if stored_in_db:
+        v2_db_pipelines[(caller_tenant, name)] = data
+    else:
+        v2_pipelines[name] = data
+
+    return {"status": "deployed", "name": name, "path": location, "store": "database" if stored_in_db else "file"}
+
+
+@app.delete("/v2/pipelines/{name}", status_code=204)
+async def delete_v2_pipeline(name: str, request: Request):
+    """Remove a runtime-authored pipeline (file + registration).
+
+    Only pipelines in the data dir can be deleted: the examples shipped in the
+    image are part of the release, and deleting one would silently resurrect
+    on the next restart anyway. Same gate as deploy — it changes the shared
+    pipeline set.
+    """
+    _authorize_action(request, "pipeline.deploy")
+    caller_tenant = get_tenant_id(request)
+    if not isinstance(name, str) or not _PIPELINE_NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="invalid pipeline name")
-    dest.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+    if not _resolve_v2_pipeline(name, caller_tenant):
+        raise HTTPException(status_code=404, detail=f"V2 pipeline '{name}' not found")
 
-    # Register in memory
-    v2_pipelines[name] = data
-
-    return {"status": "deployed", "name": name, "path": str(dest)}
+    data_dir = _v2_data_dir()
+    path = (data_dir / f"{name}.yaml").resolve()
+    removed_file = False
+    # Without PIPELINES_DATA_DIR the data dir IS the seed dir; deleting there
+    # would destroy a shipped example file, which this endpoint promises not to.
+    if data_dir != _V2_SEED_DIR and path.parent == data_dir and path.exists():
+        path.unlink()
+        removed_file = True
+    removed_row = _db_delete_v2_pipeline(name, caller_tenant) or _db_delete_v2_pipeline(name, "")
+    if not removed_file and not removed_row:
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{name}' is a shipped example pipeline and cannot be deleted",
+        )
+    if removed_row:
+        v2_db_pipelines.pop((caller_tenant, name), None)
+        v2_db_pipelines.pop(("", name), None)
+    else:
+        v2_pipelines.pop(name, None)
+    return Response(status_code=204)
 
 
 @app.get("/v2/pipelines/{name}")
-async def get_v2_pipeline(name: str):
-    """Get a v2 pipeline definition by name."""
-    if name not in v2_pipelines:
+async def get_v2_pipeline(name: str, request: Request):
+    """Get a v2 pipeline definition by name (tenant-scoped)."""
+    found = _resolve_v2_pipeline(name, get_tenant_id(request))
+    if not found:
         raise HTTPException(status_code=404, detail=f"V2 pipeline '{name}' not found")
-    return v2_pipelines[name]
+    return found
 
 
 # ---- Hot-reload endpoint ---------------------------------------------------
@@ -6275,5 +6668,12 @@ def _load_internal_extensions() -> None:
     except Exception as e:  # fail open to pure platform, but say so loudly
         print(f"[router] WARNING: internal extensions failed to load: {e}")
 
+
+# Platform control plane as an MCP server (POST /mcp). A pure translator over
+# the REST routes above — every tool runs with the caller's own headers, so
+# the action gates and audit in this file remain the single authority.
+import router_mcp  # noqa: E402
+
+router_mcp.install(app)
 
 _load_internal_extensions()
