@@ -264,5 +264,41 @@ else
 fi
 
 # --------------------------------------------------------------------------
+head_ "12. Chat history (portal session)"
+JAR=$(mktemp); PORTAL_LOGIN_OK=0
+CSRF=$(curl -s -m 10 -c "$JAR" -b "$JAR" "$PORTAL/api/auth/csrf" | jqp "d['csrfToken']")
+curl -s -o /dev/null -m 15 -c "$JAR" -b "$JAR" -X POST "$PORTAL/api/auth/callback/credentials" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode "csrfToken=$CSRF" --data-urlencode "email=${PORTAL_ADMIN_EMAIL:-admin@mcpfinder.io}" \
+  --data-urlencode "password=${PORTAL_ADMIN_PASSWORD:-admin}" --data-urlencode "json=true"
+curl -s -m 10 -b "$JAR" "$PORTAL/api/auth/session" | grep -q '"user"' && PORTAL_LOGIN_OK=1
+if [ "$PORTAL_LOGIN_OK" = 1 ]; then
+  ok "portal login"
+  if [ "$NIM_UP" = 200 ]; then
+    R=$(curl -s -m 600 -b "$JAR" -X POST "$PORTAL/api/ask" -H 'Content-Type: application/json' \
+        -d "{\"question\":\"What is the weather in Oslo?\",\"model\":\"local/$MODEL\"}")
+    CID=$(echo "$R" | jqp "d.get('chat_id') or ''")
+    [ -n "$CID" ] && ok "asking creates a chat" || no "asking creates a chat" "$(echo "$R" | cut -c1-160)"
+    R2=$(curl -s -m 600 -b "$JAR" -X POST "$PORTAL/api/ask" -H 'Content-Type: application/json' \
+        -d "{\"question\":\"And Bergen?\",\"model\":\"local/$MODEL\",\"chat_id\":\"$CID\"}")
+    echo "$R2" | jqp "str(d['inputs_used'])" | grep -qi "bergen" \
+      && ok "follow-up resolved from history" || no "follow-up resolved from history" "$(echo "$R2" | jqp "d['inputs_used']")"
+    curl -s -m 10 -b "$JAR" "$PORTAL/api/chats" | jqp "any(c['id']=='$CID' for c in d['chats'])" | grep -q True \
+      && ok "chat listed" || no "chat listed" ""
+    N=$(curl -s -m 10 -b "$JAR" "$PORTAL/api/chats/$CID" | jqp "len(d['messages'])")
+    [ "${N:-0}" -ge 4 ] && ok "reopening restores messages ($N)" || no "messages restored" "got ${N:-none}"
+    dc=$(code "$PORTAL/api/chats/$CID" 10 -b "$JAR" -X DELETE); [ "$dc" = 204 ] && ok "chat deleted" || no "chat deleted" "HTTP $dc"
+  else
+    skip "chat history flow" "model not serving"
+  fi
+  c=$(code "$PORTAL/api/ask" 15 -b "$JAR" -X POST -H 'Content-Type: application/json' -d '{"question":"x","chat_id":"11111111-1111-1111-1111-111111111111"}')
+  [ "$c" = 404 ] && ok "foreign chat_id rejected" || no "foreign chat_id rejected" "HTTP $c"
+else
+  skip "chat history" "portal login unavailable (set PORTAL_ADMIN_EMAIL/PASSWORD)"
+fi
+c=$(code "$PORTAL/api/chats" 10); [ "$c" = 401 ] && ok "chats API behind auth" || no "chats API behind auth" "HTTP $c"
+rm -f "$JAR"
+
+# --------------------------------------------------------------------------
 printf '\n\033[1mResult: %d passed, %d failed, %d skipped\033[0m\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ]

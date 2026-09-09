@@ -6,6 +6,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Chat history.** The Ask page gains a sidebar: new chat, switch, delete.
+  Conversations persist per user (`chats`/`chat_messages`, migration 021);
+  reopening a chat restores the full exchange including tool chains and raw
+  results. The last turns are replayed to the agent, so follow-up questions
+  ("And Bergen?") resolve against the conversation. The chats API rejects
+  other users' chat ids with 404; the agent remains stateless.
+
 ## [0.8.0] — Chat on any brain, platform control over MCP, hosted chat
 
 ### Added

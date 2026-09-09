@@ -99,6 +99,10 @@ class AskRequest(BaseModel):
     # For a "byo/custom/…" model: the endpoint to call. Not a secret; the
     # credential it pairs with is still resolved server-side.
     base_url: str | None = None
+    # Prior turns of this conversation, oldest first: [{role: user|agent,
+    # content}]. Replayed into pipeline selection and the platform loop so
+    # follow-ups ("and Bergen?", "run it again as a job") resolve.
+    history: list[dict] = []
 
 
 class AskResponse(BaseModel):
@@ -499,7 +503,8 @@ def _as_openai_tools(mcp_tools: list[dict]) -> list[dict]:
 
 
 async def run_platform_loop(
-    question: str, identity: dict, model: str | None, llm_headers: dict | None
+    question: str, identity: dict, model: str | None, llm_headers: dict | None,
+    history: list[dict] | None = None,
 ) -> tuple[str, list[str], list[dict]]:
     """Let the model operate the platform through the MCP control server.
 
@@ -525,6 +530,12 @@ async def run_platform_loop(
             "with the concrete facts you found (names, counts, ids, statuses). "
             "Never ask for or repeat secret values."
         )},
+        *[
+            {"role": "user" if m.get("role") == "user" else "assistant",
+             "content": str(m.get("content") or "")[:2000]}
+            for m in (history or [])[-8:]
+            if str(m.get("content") or "").strip()
+        ],
         {"role": "user", "content": question},
     ]
     called: list[str] = []
@@ -725,7 +736,20 @@ async def summarize_result(
     return template_answer(pipeline_name, raw_result, "")
 
 
-async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: str | None = None, llm_headers: dict | None = None) -> tuple[str | None, dict, str]:
+def _history_block(history: list[dict], max_turns: int = 8, max_chars: int = 400) -> str:
+    """Compact transcript of prior turns for prompt context."""
+    lines = []
+    for m in (history or [])[-max_turns:]:
+        role = "User" if m.get("role") == "user" else "Assistant"
+        content = str(m.get("content") or "").strip().replace("\n", " ")
+        if len(content) > max_chars:
+            content = content[:max_chars] + "…"
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: str | None = None, llm_headers: dict | None = None, history: list[dict] | None = None) -> tuple[str | None, dict, str]:
     """Single LLM call to select pipeline and extract arguments.
     Returns (pipeline_name, arguments, reasoning).
     Times out after LLM_TIMEOUT seconds → returns (None, {}, '').
@@ -754,7 +778,7 @@ async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: 
   and check it, list/create credentials, policy rules, audit events, scaling.
   Choose this for any question ABOUT the platform rather than about data.
 
-User question: "{question}"
+{("Recent conversation (for context — resolve references like \"there\" or \"it\"):\n" + _history_block(history) + "\n") if history else ""}User question: "{question}"
 
 Respond with ONLY valid JSON (no markdown):
 {{"tool": "<tool_name>", "arguments": {{"<param>": "<value>"}}}}
@@ -939,7 +963,7 @@ async def ask(req: AskRequest, request: Request):
 
     # 2. Single LLM call to select pipeline + extract args
     pipeline_name, tool_arguments, reasoning = await llm_select_pipeline(
-        req.question, pipeline_tools, req.model, llm_headers
+        req.question, pipeline_tools, req.model, llm_headers, req.history
     )
 
     # 3a. Platform management: agentic loop over the MCP control server, as
@@ -947,7 +971,7 @@ async def ask(req: AskRequest, request: Request):
     if pipeline_name == PLATFORM_TOOL:
         try:
             answer, called, steps = await run_platform_loop(
-                req.question, identity, req.model, llm_headers
+                req.question, identity, req.model, llm_headers, req.history
             )
         except Exception as e:
             raise HTTPException(502, f"Platform operation failed: {e}")

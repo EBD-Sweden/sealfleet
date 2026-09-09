@@ -172,6 +172,16 @@ near-JSON before giving up.
 - `OPENAI_BASE_URL` — the llm-proxy (default `http://localhost:3456/v1`)
 - `OPENAI_MODEL` — model to plan with. Prefix `local/` to pin the on-box model.
 
+**Chat history:** conversations persist in `chats`/`chat_messages`
+(migration 021), scoped to (tenant, user). The portal's `/api/ask` creates a
+chat on the first question (titled by it), stores both turns (the agent turn
+with its full AskResponse payload, so reopening restores chain badges and raw
+results), and replays the last 8 turns to the agent as `history` — used in
+pipeline selection and the platform loop so follow-ups ("And Bergen?")
+resolve. Portal routes: `GET/POST /api/chats`, `GET/DELETE /api/chats/{id}`.
+A chat id belonging to another user is a 404. The agent itself stays
+stateless.
+
 **Key interfaces:**
 - `GET /health` — Health check
 - `GET /models` — Brains the caller may plan with: on-box `local/…`, the
