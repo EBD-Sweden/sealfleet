@@ -461,6 +461,57 @@ def log_audit_event(
 
 *Update this file as you implement APIs. Document parameters, return types, error conditions, and examples.*
 
+
+## Chat + authoring endpoints (added in 0.8.0)
+
+### Runtime router
+
+- `GET /mcp-tools` — every callable MCP tool with its input description,
+  aggregated from each registered MCP's own `/tools` (accepts both
+  `{"tools":[…]}` and bare-list shapes). Unreachable MCPs degrade to manifest
+  tool names plus a `warning`. This is the vocabulary an agent uses to author
+  a pipeline; manifests alone carry only tool *names*.
+- `GET /v2/pipelines` — includes `input_schema` (JSON Schema; `required` =
+  inputs with no default) and falls back to `expected_output` for a missing
+  description. **Tenant-scoped**: shows shipped examples, global rows, and the
+  caller's own authored pipelines.
+- `POST /v2/pipelines/run` — step results carry `mcp`/`tool` (or `pipeline`)
+  so callers can render the resolved chain. Per-step `_enforce_user_mcp_access`
+  applies to delegated user identities (fail-closed per-user RBAC).
+- `POST /v2/pipelines/deploy` — `{pipeline}` or `{yaml}`; requires
+  `pipeline.deploy`. Refuses to shadow a shipped example unless the body carries
+  `"replace": true` (409). Stored in `pipelines_v2` keyed `(tenant_id, name)`
+  when a database is configured, else under `PIPELINES_DATA_DIR`.
+- `DELETE /v2/pipelines/{name}` — removes a runtime-authored pipeline (the
+  caller's own row and/or data-dir file). Requires `pipeline.deploy`. Shipped
+  examples answer 409 and are never unlinked.
+- `POST /jobs` / `POST /jobs/batch` — accept **v2** pipelines as well as named
+  ones; the creator's credentials are carried into the worker so nested
+  `pipeline:` steps pass `REQUIRE_AUTH`.
+
+### Chat agent (`core-agent`, port 8050)
+
+Callers must present the operator key (`AGENT_API_KEY`, default
+`ROUTER_API_KEY`); `/ask` trusts `X-Sealfleet-*` identity headers and forwards
+them under a delegation-enabled key, so an unauthenticated agent would let any
+caller act as any user.
+
+- `GET /models` — brains the caller may plan with: on-box `local/…` (listed
+  only when the proxy reports the backend reachable), the platform's cloud
+  default, and the tenant's own `byo/…` credentials (resolved as the delegated
+  user; empty without identity).
+- `POST /ask` — `{question, model?, credential_id?, base_url?, history?}` →
+  pipeline selection, pipeline authoring (`__create_pipeline__`), or platform
+  operations over `/mcp` (`__platform__`) → prose answer.
+
+### Portal
+
+- `GET|POST /api/chats`, `GET|DELETE /api/chats/{id}` — chat history, scoped to
+  the logged-in user. A chat id belonging to another user (or a malformed one)
+  is a 404. `POST /api/ask` creates a chat on the first question, stores both
+  turns, and replays recent turns to the agent as `history`.
+- `GET /api/ask/models` — proxies the agent's `/models` for the brain picker.
+
 ## MCP control server — `POST /mcp`
 
 MCP over streamable HTTP (JSON-RPC 2.0). Methods: `initialize`, `ping`,

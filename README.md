@@ -13,7 +13,11 @@ Sealfleet lets organizations expose internal/external capabilities as agent-call
 - **runtime/** — Runtime Router: MCP server framework, tool invoke (`/call`), typed/named/v2 pipelines, async jobs, manifests, scale-to-zero, and the `mcpfinder` CLI
 - **deploy/** — Deploy service: git-to-Kubernetes MCP deployment
 - **registry/** — Discovery service + federation
-- **core-agent/** — LLM-powered agent that maps natural language to pipeline execution
+- **agent/** — Chat agent (compose/k8s service `core-agent`): natural language →
+  pipeline selection, pipeline authoring, and platform operations over the
+  router's MCP control server
+- **runtime/llm-proxy/** — Single LLM entry point (OpenAI-compatible): on-box
+  `local/…` models, tenant `byo/…` providers, and cloud fallbacks
 - **broker/** — Secrets integration + token minting + signing
 - **policy/** — Policy decision point + policy packs
 - **observability/** — OpenTelemetry wiring + audit log schema (see `docs/OBSERVABILITY.md` for receipt map, OTEL backend config, readiness, and smoke checks)
