@@ -22,6 +22,8 @@ function req(body?: unknown): NextRequest {
   return { json: async () => body ?? {} } as unknown as NextRequest;
 }
 const params = (id: string) => ({ params: Promise.resolve({ id }) });
+const C1 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const THEIRS = "99999999-8888-7777-6666-555555555555";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -32,8 +34,8 @@ describe("chats API", () => {
     anon();
     expect(((await listChats()) as { status?: number }).status).toBe(401);
     expect(((await createChat(req())) as { status?: number }).status).toBe(401);
-    expect(((await getChat(req(), params("c1"))) as { status?: number }).status).toBe(401);
-    expect(((await deleteChat(req(), params("c1"))) as { status?: number }).status).toBe(401);
+    expect(((await getChat(req(), params(C1))) as { status?: number }).status).toBe(401);
+    expect(((await deleteChat(req(), params(C1))) as { status?: number }).status).toBe(401);
     expect(queryMock).not.toHaveBeenCalled();
   });
 
@@ -56,10 +58,17 @@ describe("chats API", () => {
     expect(queryMock.mock.calls[0][1]).toEqual(["t1", "u1", "Hello"]);
   });
 
+  it("a malformed id is a 404 before any query runs", async () => {
+    authed();
+    expect(((await getChat(req(), params("abc"))) as Response).status).toBe(404);
+    expect(((await deleteChat(req(), params("abc"))) as Response).status).toBe(404);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
   it("a chat owned by someone else is a 404, and its messages are never read", async () => {
     authed();
     queryMock.mockResolvedValue({ rows: [] }); // ownership lookup misses
-    const res = await getChat(req(), params("theirs"));
+    const res = await getChat(req(), params(THEIRS));
     expect((res as Response).status).toBe(404);
     expect(queryMock).toHaveBeenCalledTimes(1);
   });
@@ -70,16 +79,16 @@ describe("chats API", () => {
       .mockResolvedValueOnce({ rows: [{ id: "c1", title: "Weather" }] }) // getChat (route)
       .mockResolvedValueOnce({ rows: [{ id: "c1", title: "Weather" }] }) // getChat (listMessages guard)
       .mockResolvedValueOnce({ rows: [{ role: "user", content: "hi", payload: null }] });
-    const body = await ((await getChat(req(), params("c1"))) as Response).json();
+    const body = await ((await getChat(req(), params(C1))) as Response).json();
     expect(body.messages).toHaveLength(1);
   });
 
   it("delete answers 204 when a row went away and 404 otherwise", async () => {
     authed();
     queryMock.mockResolvedValueOnce({ rowCount: 1 });
-    expect(((await deleteChat(req(), params("c1"))) as Response).status).toBe(204);
+    expect(((await deleteChat(req(), params(C1))) as Response).status).toBe(204);
     queryMock.mockResolvedValueOnce({ rowCount: 0 });
-    expect(((await deleteChat(req(), params("c1"))) as Response).status).toBe(404);
+    expect(((await deleteChat(req(), params(C1))) as Response).status).toBe(404);
     for (const [, args] of queryMock.mock.calls) expect(args.slice(0, 2)).toEqual(["t1", "u1"]);
   });
 });

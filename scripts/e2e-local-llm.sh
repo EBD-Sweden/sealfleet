@@ -162,9 +162,11 @@ if [ "$NIM_UP" = 200 ]; then
     if [ -n "$CREATED" ]; then
       ok "pipeline authored: $CREATED"
       # It must now be a first-class pipeline the router knows about.
-      c=$(code "$ROUTER/v2/pipelines/$CREATED" 10 "${AUTH[@]}")
+      c=$(code "$ROUTER/v2/pipelines/$CREATED" 10 "${AUTH[@]}" "${AS_ADMIN[@]}")
       [ "$c" = 200 ] && ok "authored pipeline is registered" || no "authored pipeline registered" "HTTP $c"
-      RR=$(curl -s -m 120 -X POST "${AUTH[@]}" -H 'Content-Type: application/json' \
+      c=$(code "$ROUTER/v2/pipelines/$CREATED" 10 "${AUTH[@]}" -H "X-Sealfleet-Tenant-Id: 99999999-9999-9999-9999-999999999999" -H "X-Sealfleet-User-Id: $ADMIN_ID")
+      [ "$c" = 404 ] && ok "authored pipeline hidden from other tenants" || no "tenant isolation of authored pipeline" "HTTP $c"
+      RR=$(curl -s -m 120 -X POST "${AUTH[@]}" "${AS_ADMIN[@]}" -H 'Content-Type: application/json' \
            "$ROUTER/v2/pipelines/run" -d "{\"pipeline\":\"$CREATED\",\"inputs\":{}}")
       echo "$RR" | grep -q '"results"' && ok "authored pipeline re-runs standalone" \
                                        || no "authored pipeline re-runs" "$(echo "$RR" | cut -c1-200)"
@@ -172,7 +174,7 @@ if [ "$NIM_UP" = 200 ]; then
       # through the API (as the admin — it needs pipeline.deploy) and confirm.
       dc=$(code "$ROUTER/v2/pipelines/$CREATED" 15 -X DELETE "${AUTH[@]}" "${AS_ADMIN[@]}")
       [ "$dc" = 204 ] && ok "authored pipeline deleted via API" || no "authored pipeline deleted via API" "HTTP $dc"
-      c=$(code "$ROUTER/v2/pipelines/$CREATED" 10 "${AUTH[@]}")
+      c=$(code "$ROUTER/v2/pipelines/$CREATED" 10 "${AUTH[@]}" "${AS_ADMIN[@]}")
       [ "$c" = 404 ] && ok "deleted pipeline is gone" || no "deleted pipeline is gone" "HTTP $c"
     else
       no "pipeline authored" "$(echo "$R" | jqp "d['answer']" | cut -c1-200)"

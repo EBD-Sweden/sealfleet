@@ -22,10 +22,17 @@ SCHEMA = {"properties": {
 }}
 
 
-def test_comma_and_conjunction_strings_become_lists():
+def test_comma_separated_strings_become_lists():
     assert server.coerce_arguments({"cities": "Stockholm, Barcelona"}, SCHEMA)["cities"] == ["Stockholm", "Barcelona"]
-    assert server.coerce_arguments({"cities": "Oslo and Bergen"}, SCHEMA)["cities"] == ["Oslo", "Bergen"]
+    assert server.coerce_arguments({"cities": "Oslo; Bergen"}, SCHEMA)["cities"] == ["Oslo", "Bergen"]
     assert server.coerce_arguments({"cities": "Rome"}, SCHEMA)["cities"] == ["Rome"]
+
+
+def test_conjunctions_do_not_split_single_values():
+    """"and"/"&"/"/" occur inside legitimate one-item values; only explicit
+    separators may split ("Trinidad and Tobago" is one place, not two)."""
+    assert server.coerce_arguments({"cities": "Trinidad and Tobago"}, SCHEMA)["cities"] == ["Trinidad and Tobago"]
+    assert server.coerce_arguments({"cities": "Bosnia & Herzegovina"}, SCHEMA)["cities"] == ["Bosnia & Herzegovina"]
 
 
 def test_lists_and_unknown_keys_pass_through():

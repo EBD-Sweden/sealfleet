@@ -59,6 +59,15 @@ spec:
               value: "http://{{ $router }}:{{ .Values.router.port }}"
             - name: DEPLOY_URL
               value: "http://{{ $deploy }}:{{ .Values.deploy.port }}"
+            {{- if .Values.agent.enabled }}
+            - name: AGENT_URL
+              value: "http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "agent") }}:{{ .Values.agent.port }}"
+            {{- end }}
+            - name: RUNTIME_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: RUNTIME_API_KEY
             - name: NEXTAUTH_URL
               value: {{ include "mcpfinder.portalUrl" . | quote }}
             - name: AUTH_URL

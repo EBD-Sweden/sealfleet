@@ -19,39 +19,64 @@ export async function POST(req: NextRequest) {
   const { error, context } = await requirePortalSession();
   if (error || !context) return error ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  let chatId: string | null = null;
   try {
-    const body = await req.json();
+    const raw = await req.json().catch(() => null);
+    // A null/non-object body must not TypeError into the generic 502 path.
+    const body: Record<string, unknown> =
+      raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
     const { user } = context;
     const tenantId = user.tenant_id ?? "default";
     const question = String(body.question ?? "").trim();
+    if (!question) {
+      // Reject before anything is stored, so no agent turn can exist without
+      // its user turn and no chat is created for an empty question.
+      return NextResponse.json({ error: "question is required" }, { status: 400 });
+    }
 
     // Resolve the conversation: verify a supplied chat_id belongs to this
     // user, or start a new chat titled after the first question. History is
     // read BEFORE this question is stored, so it holds only prior turns.
-    let chatId: string | null = typeof body.chat_id === "string" ? body.chat_id : null;
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const requested = typeof body.chat_id === "string" ? body.chat_id : null;
+    // A malformed id is a client error, not "persistence unavailable" — and it
+    // must not reach Postgres, whose uuid cast error would be misread below.
+    if (requested && !UUID.test(requested)) {
+      return NextResponse.json({ error: "Chat not found" }, { status: 404 });
+    }
+
     let history: { role: string; content: string }[] = [];
     try {
-      if (chatId) {
-        if (!(await getChat(tenantId, user.id, chatId))) {
+      if (requested) {
+        if (!(await getChat(tenantId, user.id, requested))) {
           return NextResponse.json({ error: "Chat not found" }, { status: 404 });
         }
+        chatId = requested;
         history = await recentTurns(tenantId, user.id, chatId);
-      } else if (question) {
+      } else {
         chatId = (await createChat(tenantId, user.id, question)).id;
       }
-      if (chatId && question) await appendMessage(chatId, "user", question);
     } catch (e) {
-      // History is an enhancement; the question must still be answered.
+      // History/persistence is an enhancement; the question must still be answered.
       console.error("[ask] chat persistence unavailable:", e);
       chatId = null;
       history = [];
+    }
+    if (chatId) {
+      // Separate try: if the chat row exists but this write fails transiently,
+      // keep chatId so the client adopts the chat instead of orphaning it.
+      try {
+        await appendMessage(chatId, "user", question);
+      } catch (e) {
+        console.error("[ask] failed to store user turn:", e);
+      }
     }
 
     const { chat_id: _drop, ...forward } = body;
     const upstream = await fetch(`${AGENT_URL}/ask`, {
       method: "POST",
       headers: delegationHeaders(context.backendHeaders),
-      body: JSON.stringify({ ...forward, history }),
+      body: JSON.stringify({ ...forward, question, history }),
     });
 
     if (!upstream.ok) {
@@ -75,7 +100,7 @@ export async function POST(req: NextRequest) {
     });
   } catch {
     return new Response(
-      JSON.stringify({ error: "Failed to reach core agent" }),
+      JSON.stringify({ error: "Failed to reach core agent", chat_id: chatId }),
       { status: 502, headers: { "Content-Type": "application/json" } },
     );
   }

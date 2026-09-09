@@ -4474,16 +4474,18 @@ def _v2_uses_external_agent(pipeline_def: dict) -> bool:
     )
 
 
-def _resolve_job_pipeline(name: str) -> tuple[str, Any]:
+def _resolve_job_pipeline(name: str, tenant_id: str = "") -> tuple[str, Any]:
     """Jobs run either engine: ("named", NamedPipeline) or ("v2", dict).
 
     Background jobs previously only knew named (v1) pipelines, so every v2
     pipeline — including everything authored from chat — answered 404 here.
+    v2 resolution is tenant-scoped like the run endpoint.
     """
     if name in named_pipelines:
         return "named", named_pipelines[name]
-    if name in v2_pipelines:
-        return "v2", v2_pipelines[name]
+    v2 = _resolve_v2_pipeline(name, tenant_id)
+    if v2 is not None:
+        return "v2", v2
     raise HTTPException(404, f"Pipeline '{name}' not found")
 
 
@@ -4533,7 +4535,8 @@ _running_jobs: dict[str, asyncio.Task] = {}  # job_id → asyncio.Task
 
 
 async def _execute_v2_job(
-    job_id: str, pipeline_def: dict, inputs: dict, tenant_id: str, subject_id: str | None
+    job_id: str, pipeline_def: dict, inputs: dict, tenant_id: str, subject_id: str | None,
+    auth_headers: dict | None = None,
 ) -> None:
     """Run a v2 pipeline as a background job, recording per-step rows.
 
@@ -4552,6 +4555,7 @@ async def _execute_v2_job(
 
     result = await _run_v2_pipeline(
         pipeline_def, inputs, tenant_id=tenant_id, subject_id=subject_id or tenant_id,
+        auth_headers=auth_headers or {},
     )
 
     results = result.get("results") or {}
@@ -4584,6 +4588,8 @@ async def _execute_job(
     tenant_id: str,
     subject_id: str | None = None,
     authorized_actions: set[str] | None = None,
+    auth_headers: dict | None = None,
+    v2_def: dict | None = None,
 ):
     """Run a single pipeline job in the background, recording steps."""
 
@@ -4594,8 +4600,12 @@ async def _execute_job(
         )
 
         pipeline = named_pipelines.get(pipeline_name)
-        if not pipeline and pipeline_name in v2_pipelines:
-            await _execute_v2_job(job_id, v2_pipelines[pipeline_name], inputs, tenant_id, subject_id)
+        v2_def = v2_def or v2_pipelines.get(pipeline_name)
+        if not pipeline and v2_def:
+            await _execute_v2_job(
+                job_id, v2_def, inputs, tenant_id, subject_id,
+                auth_headers=auth_headers,
+            )
             return
         if not pipeline:
             _job_db_write(
@@ -4743,7 +4753,7 @@ async def create_job(req: CreateJobRequest, request: Request):
     job_id = uuid.uuid4().hex[:16]
     name = req.name or f"{req.pipeline}_{job_id[:8]}"
 
-    kind, pipeline = _resolve_job_pipeline(req.pipeline)
+    kind, pipeline = _resolve_job_pipeline(req.pipeline, get_tenant_id(request))
     if _job_pipeline_needs_agent_invoke(kind, pipeline):
         _authorize_action(request, "agent.invoke")
     tenant_id = _job_tenant_id(request, req.tenant_id)
@@ -4757,6 +4767,14 @@ async def create_job(req: CreateJobRequest, request: Request):
         (job_id, name, req.pipeline, json.dumps(req.inputs), tenant_id),
     )
 
+    # Nested `pipeline:` steps re-enter over loopback and must pass
+    # REQUIRE_AUTH as the creator did. Held in memory for the task only.
+    job_auth_headers: dict = {}
+    if request.headers.get("x-api-key"):
+        job_auth_headers["X-API-Key"] = request.headers["x-api-key"]
+    if request.headers.get("authorization"):
+        job_auth_headers["Authorization"] = request.headers["authorization"]
+
     task = asyncio.create_task(
         _execute_job(
             job_id,
@@ -4765,6 +4783,8 @@ async def create_job(req: CreateJobRequest, request: Request):
             tenant_id,
             subject_id=subject_id,
             authorized_actions=authorized_actions,
+            auth_headers=job_auth_headers,
+            v2_def=pipeline if kind == "v2" else None,
         )
     )
     _running_jobs[job_id] = task
@@ -4858,7 +4878,7 @@ async def cancel_job(job_id: str, request: Request):
 async def create_batch_job(req: BatchJobRequest, request: Request):
     """Create a batch job: one parent + N child jobs."""
     _authorize_action(request, "pipeline.invoke")
-    kind, pipeline = _resolve_job_pipeline(req.pipeline)
+    kind, pipeline = _resolve_job_pipeline(req.pipeline, get_tenant_id(request))
     if not req.items:
         raise HTTPException(400, "items list is empty")
     if _job_pipeline_needs_agent_invoke(kind, pipeline):
@@ -5058,15 +5078,21 @@ def _v2_pipeline_dirs() -> list[Path]:
     return [_V2_SEED_DIR] if data == _V2_SEED_DIR else [_V2_SEED_DIR, data]
 
 
-def _db_load_v2_pipelines() -> dict[str, dict]:
-    """Runtime-authored pipelines from the database (store of record when a
-    database is configured). Empty when there is no DB or no table yet."""
+# Runtime-authored pipelines from the database, keyed (tenant_id, name).
+# tenant_id '' = global (legacy rows / single-tenant deployments). Seeds and
+# data-dir files stay in the name-keyed v2_pipelines dict; tenant rows live
+# here so one tenant can neither see nor shadow another's pipelines.
+v2_db_pipelines: dict[tuple[str, str], dict] = {}
+
+
+def _db_load_v2_pipelines() -> dict[tuple[str, str], dict]:
+    """Empty when there is no DB or no table yet."""
     conn = _get_db()
     if not conn:
         return {}
     try:
         cur = conn.cursor()
-        cur.execute("SELECT name, definition FROM pipelines_v2 ORDER BY name")
+        cur.execute("SELECT COALESCE(tenant_id, ''), name, definition FROM pipelines_v2 ORDER BY name")
         rows = cur.fetchall()
         cur.close()
     except Exception as e:
@@ -5077,12 +5103,29 @@ def _db_load_v2_pipelines() -> dict[str, dict]:
         except Exception:
             pass
         return {}
-    out: dict[str, dict] = {}
-    for name, definition in rows:
+    out: dict[tuple[str, str], dict] = {}
+    for tenant_id, name, definition in rows:
         data = definition if isinstance(definition, dict) else json.loads(definition)
         if isinstance(data, dict) and not _validate_v2_pipeline(data):
-            out[str(name)] = data
+            out[(str(tenant_id), str(name))] = data
     return out
+
+
+def _resolve_v2_pipeline(name: str, tenant_id: str) -> dict | None:
+    """The caller's own pipeline wins over a global/seed one of the same name."""
+    return (
+        v2_db_pipelines.get((tenant_id, name))
+        or v2_db_pipelines.get(("", name))
+        or v2_pipelines.get(name)
+    )
+
+
+def _v2_visible_items(tenant_id: str) -> dict[str, dict]:
+    merged = dict(v2_pipelines)
+    for (t, name), data in v2_db_pipelines.items():
+        if t in ("", tenant_id):
+            merged[name] = data
+    return merged
 
 
 def _db_upsert_v2_pipeline(data: dict, *, tenant_id: str = "", created_by: str = "") -> bool:
@@ -5094,9 +5137,9 @@ def _db_upsert_v2_pipeline(data: dict, *, tenant_id: str = "", created_by: str =
         cur.execute(
             """INSERT INTO pipelines_v2 (name, definition, tenant_id, created_by)
                VALUES (%s, %s, %s, %s)
-               ON CONFLICT (name) DO UPDATE
+               ON CONFLICT (tenant_id, name) DO UPDATE
                  SET definition = EXCLUDED.definition, updated_at = NOW()""",
-            (data["name"], json.dumps(data, default=str), tenant_id or None, created_by or None),
+            (data["name"], json.dumps(data, default=str), tenant_id or "", created_by or None),
         )
         conn.commit()
         cur.close()
@@ -5110,13 +5153,14 @@ def _db_upsert_v2_pipeline(data: dict, *, tenant_id: str = "", created_by: str =
         return False
 
 
-def _db_delete_v2_pipeline(name: str) -> bool:
+def _db_delete_v2_pipeline(name: str, tenant_id: str) -> bool:
     conn = _get_db()
     if not conn:
         return False
     try:
         cur = conn.cursor()
-        cur.execute("DELETE FROM pipelines_v2 WHERE name = %s", (name,))
+        cur.execute("DELETE FROM pipelines_v2 WHERE name = %s AND COALESCE(tenant_id,'') = %s",
+                    (name, tenant_id))
         deleted = cur.rowcount > 0
         conn.commit()
         cur.close()
@@ -5155,11 +5199,11 @@ def _load_yaml_pipeline_v2():
             print(f"[router] loaded v2 pipeline: {data['name']} from {yaml_file}")
         except Exception as e:
             print(f"[router] WARN: failed to load v2 pipeline {yaml_file}: {e}")
-    db_defs = _db_load_v2_pipelines()
-    for name, data in db_defs.items():
-        v2_pipelines[name] = data
-        count += 1
-        print(f"[router] loaded v2 pipeline: {name} from database")
+    v2_db_pipelines.clear()
+    v2_db_pipelines.update(_db_load_v2_pipelines())
+    count += len(v2_db_pipelines)
+    for (t, name) in v2_db_pipelines:
+        print(f"[router] loaded v2 pipeline: {name} from database (tenant {t or 'global'})")
     print(f"[router] loaded {count} v2 pipelines")
 
 
@@ -5344,8 +5388,9 @@ def _v2_input_schema(pipeline: dict) -> dict:
 
 
 @app.get("/v2/pipelines")
-async def list_v2_pipelines():
-    """List all loaded v2 pipelines."""
+async def list_v2_pipelines(request: Request):
+    """List v2 pipelines visible to the caller's tenant."""
+    visible = _v2_visible_items(get_tenant_id(request))
     return {
         "pipelines": [
             {
@@ -5365,7 +5410,7 @@ async def list_v2_pipelines():
                 "input_schema": _v2_input_schema(p),
                 "steps": len(p.get("steps", [])),
             }
-            for p in v2_pipelines.values()
+            for p in visible.values()
         ]
     }
 
@@ -5378,8 +5423,10 @@ async def run_v2_pipeline(request: Request):
     """
     body = await request.json()
     pipeline_name = body.get("pipeline")
-    if not pipeline_name or pipeline_name not in v2_pipelines:
-        available = list(v2_pipelines.keys())
+    caller_tenant = get_tenant_id(request)
+    pipeline_def = _resolve_v2_pipeline(pipeline_name, caller_tenant) if pipeline_name else None
+    if not pipeline_def:
+        available = sorted(_v2_visible_items(caller_tenant).keys())
         raise HTTPException(status_code=404, detail=f"V2 pipeline '{pipeline_name}' not found. Available: {available}")
     inputs = body.get("inputs", {})
     body_size_bytes = int(request.headers.get("content-length") or 0)
@@ -5387,7 +5434,7 @@ async def run_v2_pipeline(request: Request):
     # Pre-check MCP permissions for user identities (JWT or delegated API key).
     # Nested pipeline-call steps re-enter through their own run endpoint, which
     # performs the same enforcement with the forwarded credential.
-    for step in v2_pipelines[pipeline_name].get("steps", []):
+    for step in pipeline_def.get("steps", []):
         if step.get("mcp"):
             _enforce_user_mcp_access(request, step["mcp"], step.get("tool"))
 
@@ -5399,7 +5446,7 @@ async def run_v2_pipeline(request: Request):
     if request.headers.get("authorization"):
         auth_headers["Authorization"] = request.headers["authorization"]
     result = await _run_v2_pipeline(
-        v2_pipelines[pipeline_name],
+        pipeline_def,
         inputs,
         tenant_id=get_tenant_id(request),
         workspace_id=get_workspace_id(request) or str(body.get("workspace") or inputs.get("workspace") or ""),
@@ -5455,8 +5502,9 @@ async def deploy_v2_pipeline(request: Request):
             detail=f"'{name}' is a shipped example pipeline; pass \"replace\": true to override it",
         )
 
+    caller_tenant = get_tenant_id(request)
     stored_in_db = _db_upsert_v2_pipeline(
-        data, tenant_id=get_tenant_id(request), created_by=str(get_subject_id(request) or ""),
+        data, tenant_id=caller_tenant, created_by=str(get_subject_id(request) or ""),
     )
     location: str
     if stored_in_db:
@@ -5471,8 +5519,11 @@ async def deploy_v2_pipeline(request: Request):
         dest.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
         location = str(dest)
 
-    # Register in memory
-    v2_pipelines[name] = data
+    # Register in memory, under the caller's tenant when DB-backed.
+    if stored_in_db:
+        v2_db_pipelines[(caller_tenant, name)] = data
+    else:
+        v2_pipelines[name] = data
 
     return {"status": "deployed", "name": name, "path": location, "store": "database" if stored_in_db else "file"}
 
@@ -5487,33 +5538,41 @@ async def delete_v2_pipeline(name: str, request: Request):
     pipeline set.
     """
     _authorize_action(request, "pipeline.deploy")
+    caller_tenant = get_tenant_id(request)
     if not isinstance(name, str) or not _PIPELINE_NAME_RE.match(name):
         raise HTTPException(status_code=400, detail="invalid pipeline name")
-    if name not in v2_pipelines:
+    if not _resolve_v2_pipeline(name, caller_tenant):
         raise HTTPException(status_code=404, detail=f"V2 pipeline '{name}' not found")
 
     data_dir = _v2_data_dir()
     path = (data_dir / f"{name}.yaml").resolve()
     removed_file = False
-    if path.parent == data_dir and path.exists():
+    # Without PIPELINES_DATA_DIR the data dir IS the seed dir; deleting there
+    # would destroy a shipped example file, which this endpoint promises not to.
+    if data_dir != _V2_SEED_DIR and path.parent == data_dir and path.exists():
         path.unlink()
         removed_file = True
-    removed_row = _db_delete_v2_pipeline(name)
+    removed_row = _db_delete_v2_pipeline(name, caller_tenant) or _db_delete_v2_pipeline(name, "")
     if not removed_file and not removed_row:
         raise HTTPException(
             status_code=409,
             detail=f"'{name}' is a shipped example pipeline and cannot be deleted",
         )
-    v2_pipelines.pop(name, None)
+    if removed_row:
+        v2_db_pipelines.pop((caller_tenant, name), None)
+        v2_db_pipelines.pop(("", name), None)
+    else:
+        v2_pipelines.pop(name, None)
     return Response(status_code=204)
 
 
 @app.get("/v2/pipelines/{name}")
-async def get_v2_pipeline(name: str):
-    """Get a v2 pipeline definition by name."""
-    if name not in v2_pipelines:
+async def get_v2_pipeline(name: str, request: Request):
+    """Get a v2 pipeline definition by name (tenant-scoped)."""
+    found = _resolve_v2_pipeline(name, get_tenant_id(request))
+    if not found:
         raise HTTPException(status_code=404, detail=f"V2 pipeline '{name}' not found")
-    return v2_pipelines[name]
+    return found
 
 
 # ---- Hot-reload endpoint ---------------------------------------------------

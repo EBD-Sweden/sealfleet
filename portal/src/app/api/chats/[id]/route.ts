@@ -6,11 +6,14 @@ export const dynamic = "force-dynamic";
 
 type Params = { params: Promise<{ id: string }> };
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function GET(_req: NextRequest, { params }: Params) {
   const { error, context } = await requirePortalSession();
   if (error || !context) return error ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { user } = context;
   const { id } = await params;
+  if (!UUID.test(id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
   try {
     const chat = await getChat(user.tenant_id ?? "default", user.id, id);
     if (!chat) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -26,6 +29,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   if (error || !context) return error ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { user } = context;
   const { id } = await params;
+  if (!UUID.test(id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
   try {
     const gone = await deleteChat(user.tenant_id ?? "default", user.id, id);
     if (!gone) return NextResponse.json({ error: "Not found" }, { status: 404 });

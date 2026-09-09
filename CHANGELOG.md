@@ -16,6 +16,17 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.0] — Chat on any brain, platform control over MCP, hosted chat
 
+> Pre-merge review (two independent high-effort passes, 35 confirmed findings)
+> was applied before release: tenant-scoped authored pipelines (migration 022 —
+> previously one tenant could list/run/overwrite another's), background jobs
+> carry the creator's auth for nested pipeline steps, DELETE can no longer
+> unlink shipped seed files in dev mode, unreachable local brains are not
+> advertised, k8s/Helm gained the chat auth contract (agent + llm-proxy
+> templates, RUNTIME_API_KEY), RBAC denials surface as clear chat answers,
+> orphaned-chat and UUID-validation fixes in the chats API, the platform
+> loop's write hygiene is keyed on MCP readOnlyHint annotations, and the
+> answer-writer now sees conversation history (fenced as data).
+
 ### Added
 - **Local LLM provider.** The chat can run entirely on-box: `local/<model>`
   pins a request to `LOCAL_LLM_BASE_URL` (NVIDIA NIM, vLLM, llama.cpp, Ollama)

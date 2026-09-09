@@ -54,6 +54,27 @@ const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || "";
 const LOCAL_LLM_TIMEOUT_MS = parseInt(process.env.LOCAL_LLM_TIMEOUT_MS || "300000", 10);
 const LOCAL_PREFIX = "local/";
 
+let _localProbe = { at: 0, reachable: false };
+function probeLocal() {
+  return new Promise((resolve) => {
+    if (!LOCAL_LLM_BASE_URL) return resolve(false);
+    if (Date.now() - _localProbe.at < 10000) return resolve(_localProbe.reachable);
+    const parsed = url.parse(LOCAL_LLM_BASE_URL);
+    const transport = parsed.protocol === "https:" ? https : http;
+    const req = transport.request({
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+      path: (parsed.path || "").replace(/\/$/, "") + "/models",
+      method: "GET",
+      timeout: 1500,
+    }, (res) => { res.resume(); done(res.statusCode < 500); });
+    const done = (ok) => { _localProbe = { at: Date.now(), reachable: ok }; resolve(ok); };
+    req.on("error", () => done(false));
+    req.on("timeout", () => { req.destroy(); done(false); });
+    req.end();
+  });
+}
+
 // Shared secret callers must present (Authorization: Bearer <token>, which is
 // what an OpenAI client sends as its api_key). Unset = open, for local dev
 // only: an open proxy on a public ingress lets strangers spend the platform's
@@ -486,14 +507,17 @@ function callLocal(openAiBody) {
 
 // --- HTTP server ---
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const sendJson = (code, obj) => {
     const body = JSON.stringify(obj);
     res.writeHead(code, { "content-type": "application/json", "content-length": Buffer.byteLength(body) });
     res.end(body);
   };
 
-  // Health
+  // Reachability of the configured local backend, cached briefly. `enabled`
+  // stays "configured"; `reachable` says whether anything answers — so a
+  // compose stack without the local-llm profile doesn't advertise (and the
+  // chat doesn't auto-select) a brain that cannot exist.
   if (req.method === "GET" && (req.url === "/" || req.url === "/health")) {
     return sendJson(200, {
       status: "ok",
@@ -503,8 +527,9 @@ const server = http.createServer((req, res) => {
       auth: LLM_PROXY_TOKEN ? "token" : "open",
       ...(callerAuthorized(req) ? {
         local: LOCAL_LLM_BASE_URL
-          ? { enabled: true, base_url: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL }
-          : { enabled: false },
+          ? { enabled: true, base_url: LOCAL_LLM_BASE_URL, model: LOCAL_LLM_MODEL,
+              reachable: await probeLocal() }
+          : { enabled: false, reachable: false },
         byo: { providers: Object.keys(BYO_PROVIDERS).concat("anthropic").sort() },
       } : {}),
     });

@@ -1,0 +1,76 @@
+{{- if .Values.agent.enabled }}
+{{- $name := include "mcpfinder.componentName" (dict "ctx" . "component" "agent") }}
+{{- $router := include "mcpfinder.componentName" (dict "ctx" . "component" "router") }}
+{{- $proxy := include "mcpfinder.componentName" (dict "ctx" . "component" "llm-proxy") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+    app: {{ $name }}
+spec:
+  replicas: {{ .Values.agent.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "agent") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "agent") | nindent 8 }}
+        part-of: mcpfinder
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: agent
+          image: {{ include "mcpfinder.image" (dict "ctx" . "svc" .Values.agent) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.agent.port }}
+          env:
+            - name: PORT
+              value: {{ .Values.agent.port | quote }}
+            - name: ROUTER_URL
+              value: "http://{{ $router }}:{{ .Values.router.port }}"
+            - name: OPENAI_BASE_URL
+              value: "http://{{ $proxy }}:{{ .Values.llmProxy.port }}/v1"
+            - name: OPENAI_MODEL
+              value: {{ .Values.agent.chatModel | quote }}
+            {{- range $k := list "ROUTER_API_KEY" "AGENT_API_KEY" "OPENAI_API_KEY" }}
+            - name: {{ $k }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" $ }}
+                  key: RUNTIME_API_KEY
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.agent.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "agent") | nindent 4 }}
+  ports:
+    - port: {{ .Values.agent.port }}
+      targetPort: {{ .Values.agent.port }}
+      name: http
+{{- end }}

@@ -121,8 +121,12 @@ TOOLS: list[dict] = [
           "Create or replace a v2 pipeline from a definition object "
           "{name, version:2, description, inputs, steps:[{id, mcp, tool, inputs}], output}. "
           "Requires pipeline.deploy.",
-          _obj({"pipeline": {"type": "object", "description": "v2 pipeline definition"}}, ["pipeline"]),
-          "POST", "/v2/pipelines/deploy", body=lambda a: {"pipeline": a["pipeline"]}),
+          _obj({"pipeline": {"type": "object", "description": "v2 pipeline definition"},
+                "replace": {"type": "boolean", "default": False,
+                            "description": "Required true to override a shipped example of the same name"}},
+               ["pipeline"]),
+          "POST", "/v2/pipelines/deploy",
+          body=lambda a: {"pipeline": a["pipeline"], **({"replace": True} if a.get("replace") else {})}),
     _tool("pipeline_delete", "Delete a runtime-authored v2 pipeline (shipped examples are protected).",
           _obj({"name": _s("Pipeline name")}, ["name"]), "DELETE", "/v2/pipelines/{name}"),
     _tool("pipeline_reload", "Re-scan pipeline definitions from disk.",
@@ -192,7 +196,12 @@ FORBIDDEN_TOOLS = {"credential_use"}
 
 
 def public_tools() -> list[dict]:
-    return [{"name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"]} for t in TOOLS]
+    return [{
+        "name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"],
+        # MCP tool annotations: GET-backed tools are read-only. The chat loop
+        # keys its write-hygiene on this instead of guessing from names.
+        "annotations": {"readOnlyHint": t["method"] == "GET"},
+    } for t in TOOLS]
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +210,11 @@ def public_tools() -> list[dict]:
 
 def _loopback_url() -> str:
     port = os.environ.get("PORT") or os.environ.get("APP_PORT") or "8040"
-    return os.environ.get("MCP_CONTROL_LOOPBACK_URL") or f"http://127.0.0.1:{port}"
+    # With app-level TLS (entrypoint.sh serves HTTPS when both are set) a plain
+    # http loopback would be refused; match the scheme the server actually speaks.
+    tls = bool(os.environ.get("TLS_CERT_FILE") and os.environ.get("TLS_KEY_FILE"))
+    scheme = "https" if tls else "http"
+    return os.environ.get("MCP_CONTROL_LOOPBACK_URL") or f"{scheme}://127.0.0.1:{port}"
 
 
 def _deploy_url() -> str:
@@ -237,7 +250,11 @@ async def _forward(request: Request, tool: dict, args: dict) -> tuple[int, Any]:
         kwargs["json"] = tool["body"](args)
 
     transport = _transport_factory()
-    async with httpx.AsyncClient(transport=transport, timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+    # Loopback TLS uses this deployment's own cert, typically self-signed for
+    # 127.0.0.1 — verification would reject the very server we are inside.
+    verify = not (tool["service"] != "deploy" and base.startswith("https://127.0.0.1"))
+    async with httpx.AsyncClient(transport=transport, verify=verify,
+                                 timeout=httpx.Timeout(600.0, connect=10.0)) as client:
         resp = await client.request(tool["method"], url, **kwargs)
 
     ctype = resp.headers.get("content-type", "")

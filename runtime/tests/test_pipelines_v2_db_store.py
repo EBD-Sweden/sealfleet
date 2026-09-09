@@ -20,11 +20,13 @@ class FakeCursor:
     def execute(self, sql, params=()):
         self.conn.log.append((sql.strip().split()[0].upper(), params))
         if sql.lstrip().upper().startswith("SELECT"):
-            self._rows = [(n, json.dumps(d)) for n, d in self.conn.rows.items()]
+            self._rows = [(t, n, json.dumps(d)) for (t, n), d in self.conn.rows.items()]
         elif sql.lstrip().upper().startswith("INSERT"):
-            self.conn.rows[params[0]] = json.loads(params[1])
+            # (name, definition, tenant_id, created_by)
+            self.conn.rows[(params[2], params[0])] = json.loads(params[1])
         elif sql.lstrip().upper().startswith("DELETE"):
-            self.rowcount = 1 if self.conn.rows.pop(params[0], None) is not None else 0
+            # (name, tenant_id)
+            self.rowcount = 1 if self.conn.rows.pop((params[1], params[0]), None) is not None else 0
 
     def fetchall(self):
         return self._rows
@@ -69,11 +71,37 @@ def _auth(monkeypatch):
 
 def test_loader_reads_db_after_files_and_db_wins(monkeypatch, db):
     seed = next(iter(p.stem for p in router._V2_SEED_DIR.glob("*.yaml")))
-    db.rows = {"db_authored": DEF, seed: {**DEF, "name": seed, "description": "FROM DB"}}
+    db.rows = {("t1", "db_authored"): DEF,
+               ("", seed): {**DEF, "name": seed, "description": "FROM DB"}}
     monkeypatch.setattr(router, "v2_pipelines", {})
+    monkeypatch.setattr(router, "v2_db_pipelines", {})
     router._load_yaml_pipeline_v2()
-    assert "db_authored" in router.v2_pipelines
-    assert router.v2_pipelines[seed]["description"] == "FROM DB"
+    assert router._resolve_v2_pipeline("db_authored", "t1") is not None
+    assert router._resolve_v2_pipeline("db_authored", "t2") is None, "tenant-scoped"
+    assert router._resolve_v2_pipeline(seed, "anyone")["description"] == "FROM DB"
+
+
+def test_visibility_and_run_are_tenant_scoped(monkeypatch, db):
+    monkeypatch.setattr(router, "v2_pipelines", {})
+    monkeypatch.setattr(router, "v2_db_pipelines", {
+        ("t1", "mine"): {**DEF, "name": "mine"},
+        ("t2", "theirs"): {**DEF, "name": "theirs"},
+        ("", "shared"): {**DEF, "name": "shared"},
+    })
+    visible = router._v2_visible_items("t1")
+    assert set(visible) == {"mine", "shared"}
+    assert "theirs" not in router._v2_visible_items("t1")
+
+
+def test_same_name_in_two_tenants_does_not_collide(monkeypatch, db):
+    monkeypatch.setattr(router, "v2_pipelines", {})
+    monkeypatch.setattr(router, "v2_db_pipelines", {})
+    a = {**DEF, "name": "report", "description": "tenant A"}
+    b = {**DEF, "name": "report", "description": "tenant B"}
+    router._db_upsert_v2_pipeline(a, tenant_id="tA")
+    router._db_upsert_v2_pipeline(b, tenant_id="tB")
+    assert db.rows[("tA", "report")]["description"] == "tenant A"
+    assert db.rows[("tB", "report")]["description"] == "tenant B"
 
 
 def test_loader_survives_a_missing_table(monkeypatch):
@@ -91,10 +119,12 @@ async def test_deploy_writes_to_db_not_file_when_db_present(monkeypatch, tmp_pat
     monkeypatch.setenv("PIPELINES_DATA_DIR", str(tmp_path))
     headers = _auth(monkeypatch)
     monkeypatch.setattr(router, "v2_pipelines", {})
+    monkeypatch.setattr(router, "v2_db_pipelines", {})
     r = await client.post("/v2/pipelines/deploy", json={"pipeline": DEF}, headers=headers)
     assert r.status_code == 200, r.text
     assert r.json()["store"] == "database"
-    assert "db_authored" in db.rows
+    assert ("qa", "db_authored") in db.rows          # stored under the caller's tenant
+    assert ("qa", "db_authored") in router.v2_db_pipelines
     assert not (tmp_path / "db_authored.yaml").exists()
 
 
@@ -112,12 +142,13 @@ async def test_delete_removes_db_row_and_protects_seeds(monkeypatch, tmp_path, d
     monkeypatch.setattr(router, "_get_db", lambda: db)   # after test_app's patch
     monkeypatch.setenv("PIPELINES_DATA_DIR", str(tmp_path))
     headers = _auth(monkeypatch)
-    db.rows = {"db_authored": DEF}
+    db.rows = {("qa", "db_authored"): DEF}
     monkeypatch.setattr(router, "v2_pipelines", {})
+    monkeypatch.setattr(router, "v2_db_pipelines", {})
     router._load_yaml_pipeline_v2()
 
     r = await client.delete("/v2/pipelines/db_authored", headers=headers)
-    assert r.status_code == 204 and "db_authored" not in db.rows
+    assert r.status_code == 204 and ("qa", "db_authored") not in db.rows
 
     seed = next(iter(p.stem for p in router._V2_SEED_DIR.glob("*.yaml")))
     r = await client.delete(f"/v2/pipelines/{seed}", headers=headers)

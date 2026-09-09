@@ -66,6 +66,7 @@ export default function AskPage() {
   useEffect(() => { refreshChats(); }, []);
 
   const newChat = () => {
+    if (loading) return;  // an in-flight answer would land in the blank view
     setChatId(null);
     setMessages([]);
     setInput("");
@@ -90,6 +91,7 @@ export default function AskPage() {
   };
 
   const removeChat = async (id: string) => {
+    if (loading) return;
     try {
       const res = await fetch(`/api/chats/${id}`, { method: "DELETE" });
       if (res.ok || res.status === 404) {
@@ -166,6 +168,13 @@ export default function AskPage() {
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
+        // The server creates the chat and stores the user turn BEFORE calling
+        // the agent; adopt it even on failure so the retry lands in the same
+        // chat instead of orphaning this one.
+        if (err.chat_id && !chatId) {
+          setChatId(err.chat_id);
+          refreshChats();
+        }
         setMessages((prev) => [
           ...prev,
           {
@@ -214,7 +223,8 @@ export default function AskPage() {
       <aside className="w-60 shrink-0 flex flex-col border-r pr-3">
         <button
           onClick={newChat}
-          className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-accent transition-colors mb-3"
+          disabled={loading}
+          className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-accent transition-colors mb-3 disabled:opacity-50"
         >
           <Plus className="h-4 w-4" /> New chat
         </button>
