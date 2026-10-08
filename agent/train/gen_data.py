@@ -717,6 +717,12 @@ def main() -> None:
     ap.add_argument("--val-frac", type=float, default=0.05)
     ap.add_argument("--system-prefix", default="/no_think",
                     help='prepended to the system turn (Nemotron reasoning off); "" to disable')
+    ap.add_argument("--args-format", choices=["string", "dict"], default="string",
+                    help="tool_call arguments as an OpenAI JSON string, or a dict (chat templates that "
+                         "iterate arguments|items, e.g. Nemotron-3-Nano)")
+    ap.add_argument("--expand-turns", action="store_true",
+                    help="split each trajectory into one example per assistant turn, for trainers "
+                         "that only compute loss on the final assistant turn (nemo-automodel ChatDataset)")
     ap.add_argument("--seed", type=int, default=7)
     opts = ap.parse_args()
 
@@ -754,21 +760,39 @@ def main() -> None:
                 ex["messages"].insert(0, {"role": "system", "content": opts.system_prefix})
         if ex["tools"] is None:
             del ex["tools"]
+        if opts.args_format == "dict":
+            for m in ex["messages"]:
+                for c in m.get("tool_calls") or []:
+                    c["function"]["arguments"] = json.loads(c["function"]["arguments"])
         rows.append(ex)
         made[task] += 1
 
     random.shuffle(rows)
     n_val = max(1, int(len(rows) * opts.val_frac))
+    parts = {"val.jsonl": rows[:n_val], "train.jsonl": rows[n_val:]}
+    if opts.expand_turns:
+        # After the split, so one conversation's turns never straddle train/val.
+        for name, part in parts.items():
+            expanded = []
+            for r in part:
+                ends = [i for i, m in enumerate(r["messages"]) if m["role"] == "assistant"]
+                for k, i in enumerate(ends):
+                    expanded.append({**r, "messages": r["messages"][:i + 1],
+                                     "meta": {**r["meta"], "turn": k, "turns": len(ends)}})
+            random.shuffle(expanded)
+            parts[name] = expanded
     out = Path(opts.out)
     out.mkdir(parents=True, exist_ok=True)
-    for name, part in (("val.jsonl", rows[:n_val]), ("train.jsonl", rows[n_val:])):
+    for name, part in parts.items():
         with open(out / name, "w") as f:
             for r in part:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
     from collections import Counter
-    stats = {"train": len(rows) - n_val, "val": n_val, "excluded_benchmark_questions": leaked,
-             "by_task": Counter(r["meta"]["task"] for r in rows),
-             "select_kinds": Counter(r["meta"].get("kind") for r in rows if r["meta"]["task"] == "select")}
+    allrows = parts["train.jsonl"] + parts["val.jsonl"]
+    stats = {"train": len(parts["train.jsonl"]), "val": len(parts["val.jsonl"]), "conversations": len(rows),
+             "excluded_benchmark_questions": leaked,
+             "by_task": Counter(r["meta"]["task"] for r in allrows),
+             "select_kinds": Counter(r["meta"].get("kind") for r in allrows if r["meta"]["task"] == "select")}
     (out / "stats.json").write_text(json.dumps(stats, indent=2, default=dict))
     print(json.dumps(stats, indent=2, default=dict))
 

@@ -64,7 +64,7 @@ def main(path: str) -> int:
                     errors["platform: tool not offered"] += 1
                     continue
                 try:
-                    args = json.loads(fn["arguments"])
+                    args = fn["arguments"] if isinstance(fn["arguments"], dict) else json.loads(fn["arguments"])
                 except json.JSONDecodeError:
                     errors["platform: arguments not JSON"] += 1
                     continue
