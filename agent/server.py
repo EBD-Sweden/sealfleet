@@ -59,6 +59,29 @@ llm = AsyncOpenAI(
     api_key=OPENAI_API_KEY,
     timeout=httpx.Timeout(max(LLM_TIMEOUT, LOCAL_LLM_TIMEOUT), connect=3.0),
 )
+
+# Prepended to the system turn of every request to a "local/" model, e.g.
+# "/no_think" to switch off Nemotron's reasoning (the Sealfleet LoRA data in
+# agent/train is generated with it). Cloud and byo models never get it.
+LOCAL_LLM_SYSTEM_PREFIX = os.getenv("LOCAL_LLM_SYSTEM_PREFIX", "")
+
+
+def _with_system_prefix(messages: list[dict], prefix: str) -> list[dict]:
+    if messages and messages[0].get("role") == "system":
+        return [{**messages[0], "content": prefix + "\n" + str(messages[0].get("content") or "")}, *messages[1:]]
+    return [{"role": "system", "content": prefix}, *messages]
+
+
+if LOCAL_LLM_SYSTEM_PREFIX:
+    _create = llm.chat.completions.create
+
+    async def _create_with_prefix(**kw):
+        if str(kw.get("model") or OPENAI_MODEL).startswith("local/"):
+            kw["messages"] = _with_system_prefix(kw["messages"], LOCAL_LLM_SYSTEM_PREFIX)
+        return await _create(**kw)
+
+    llm.chat.completions.create = _create_with_prefix
+
 http = httpx.AsyncClient(
     timeout=20.0,
     headers={"X-API-Key": ROUTER_API_KEY} if ROUTER_API_KEY else {},

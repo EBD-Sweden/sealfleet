@@ -51,3 +51,14 @@ def test_sentinel_without_underscores_maps_back():
 def test_real_pipeline_of_the_same_name_wins():
     assert server._normalize_sentinel("platform", [{"name": "platform"}]) == "platform"
     assert server._normalize_sentinel("weather_trip_planner", TOOLS) == "weather_trip_planner"
+
+
+def test_system_prefix_prepends_to_existing_system_turn():
+    msgs = [{"role": "system", "content": "You operate"}, {"role": "user", "content": "hi"}]
+    out = server._with_system_prefix(msgs, "/no_think")
+    assert out[0]["content"] == "/no_think\nYou operate" and out[1] == msgs[1]
+
+
+def test_system_prefix_inserts_system_turn_when_missing():
+    out = server._with_system_prefix([{"role": "user", "content": "hi"}], "/no_think")
+    assert out == [{"role": "system", "content": "/no_think"}, {"role": "user", "content": "hi"}]
