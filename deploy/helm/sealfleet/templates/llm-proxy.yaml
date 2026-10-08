@@ -1,5 +1,8 @@
 {{- if .Values.llmProxy.enabled }}
 {{- $name := include "mcpfinder.componentName" (dict "ctx" . "component" "llm-proxy") }}
+# Single OpenAI-compatible LLM entry point for the platform. Models prefixed
+# "local/" are pinned to llmProxy.local.baseUrl (an on-cluster/on-box server)
+# and never fall back to a cloud provider.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,6 +26,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "mcpfinder.scheduling" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -34,13 +38,24 @@ spec:
           ports:
             - containerPort: {{ .Values.llmProxy.port }}
           env:
-            - name: PORT
+            - name: LLM_PROXY_PORT
               value: {{ .Values.llmProxy.port | quote }}
+            # Callers must present the operator key as their api_key.
             - name: LLM_PROXY_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "mcpfinder.secretName" . }}
                   key: RUNTIME_API_KEY
+            {{- with .Values.llmProxy.local }}
+            {{- if .baseUrl }}
+            - name: LOCAL_LLM_BASE_URL
+              value: {{ .baseUrl | quote }}
+            - name: LOCAL_LLM_MODEL
+              value: {{ .model | quote }}
+            - name: LOCAL_LLM_TIMEOUT_MS
+              value: {{ .timeoutMs | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.llmProxy.anthropicApiKey }}
             - name: ANTHROPIC_API_KEY
               value: {{ .Values.llmProxy.anthropicApiKey | quote }}
@@ -49,10 +64,22 @@ spec:
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
+          {{- with .Values.llmProxy.cloudSecret }}
+          # Optional cloud fallbacks (ANTHROPIC_API_KEY, AI_GATEWAY_API_KEY,
+          # CLAUDE_CODE_OAUTH_TOKEN) from a pre-created Secret.
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+                optional: true
+          {{- end }}
           readinessProbe:
             httpGet: { path: /health, port: {{ .Values.llmProxy.port }} }
             initialDelaySeconds: 3
             periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.llmProxy.port }} }
+            initialDelaySeconds: 10
+            periodSeconds: 30
           resources:
             {{- toYaml .Values.llmProxy.resources | nindent 12 }}
 ---
@@ -63,6 +90,7 @@ metadata:
   labels:
     {{- include "mcpfinder.labels" . | nindent 4 }}
     app.kubernetes.io/component: llm-proxy
+    app: {{ $name }}
 spec:
   type: ClusterIP
   selector:

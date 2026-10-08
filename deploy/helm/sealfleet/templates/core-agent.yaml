@@ -1,0 +1,95 @@
+{{- if .Values.coreAgent.enabled }}
+{{- $name := include "mcpfinder.componentName" (dict "ctx" . "component" "core-agent") }}
+{{- $router := include "mcpfinder.componentName" (dict "ctx" . "component" "router") }}
+{{- $proxy := include "mcpfinder.componentName" (dict "ctx" . "component" "llm-proxy") }}
+# LLM-powered chat agent behind the portal's chat: plans pipelines and platform
+# actions with the model behind llm-proxy, executes them via the router.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core-agent
+    app: {{ $name }}
+spec:
+  replicas: {{ .Values.coreAgent.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "core-agent") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "core-agent") | nindent 8 }}
+        part-of: mcpfinder
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "mcpfinder.scheduling" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: core-agent
+          image: {{ include "mcpfinder.image" (dict "ctx" . "svc" .Values.coreAgent) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.coreAgent.port }}
+          env:
+            - name: PORT
+              value: {{ .Values.coreAgent.port | quote }}
+            - name: ROUTER_URL
+              value: "http://{{ $router }}:{{ .Values.router.port }}"
+            - name: OPENAI_BASE_URL
+              value: "http://{{ $proxy }}:{{ .Values.llmProxy.port }}/v1"
+            - name: OPENAI_MODEL
+              value: {{ .Values.coreAgent.model | quote }}
+            - name: LLM_TIMEOUT
+              value: {{ .Values.coreAgent.llmTimeout | quote }}
+            # The router requires auth: present the operator key (pipeline.invoke /
+            # agent.invoke). llm-proxy accepts the same key as its api_key.
+            - name: ROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: RUNTIME_API_KEY
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: RUNTIME_API_KEY
+            {{- range $k, $v := .Values.coreAgent.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.coreAgent.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.coreAgent.port }} }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.coreAgent.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core-agent
+    app: {{ $name }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "core-agent") | nindent 4 }}
+  ports:
+    - port: {{ .Values.coreAgent.port }}
+      targetPort: {{ .Values.coreAgent.port }}
+      name: http
+{{- end }}

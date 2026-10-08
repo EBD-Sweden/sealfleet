@@ -146,8 +146,14 @@
 speaks MCP to the router's own `/mcp` — the same surface external clients use
 — with the logged-in user's identity on every call. Standard OpenAI
 tool-calling; capped at `PLATFORM_MAX_STEPS` (8). Native tool-calling is
-required of the model: the NIM supports it; the Anthropic path in llm-proxy
+required of the model: the NIM and spark-infer (mistral.rs, from the spark9 build) support it; the Anthropic path in llm-proxy
 does not yet translate `tools`.
+
+**Selection robustness for small local models:** `_parse_selection` keeps the
+tool choice when only the `arguments` object is malformed (Qwen2.5-7B echoes the
+prompt placeholder as `{"}}`), and `_normalize_sentinel` maps `platform` /
+`create_pipeline` back to the `__…__` sentinels (markdown-trained models read
+the underscores as bold). Tests: `runtime/tests/test_agent_selection_parse.py`.
 
 **Pipeline authoring from chat:** a pseudo-tool `__create_pipeline__` is offered
 in the same selection call as real pipelines. When chosen, the agent fetches the

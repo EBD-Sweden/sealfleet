@@ -1,0 +1,76 @@
+# Local single-machine k3s install (e.g. a DGX Spark / GB10 box) next to an
+# on-cluster inference engine. Images are built locally and imported into k3s
+# containerd (no registry):
+#
+#   T=k3s-local
+#   docker build -t sealfleet-runtime:$T runtime
+#   docker build -t sealfleet-registry:$T registry
+#   docker build -t sealfleet-deploy:$T deploy
+#   docker build -t sealfleet-agent:$T agent
+#   docker build -t sealfleet-llm-proxy:$T runtime/llm-proxy
+#   docker build -t sealfleet-portal:$T portal
+#   docker build -t sealfleet-example-mcps:$T -f mcps/Dockerfile .
+#   docker build -t sealfleet-migrate-sql:$T -f db/Dockerfile .
+#   docker save sealfleet-{runtime,registry,deploy,agent,llm-proxy,portal,example-mcps,migrate-sql}:$T \
+#     | sudo k3s ctr images import -
+#
+# Secrets are BYO (secrets.existingSecret) — create them out-of-band, see the
+# chart README "Local k3s" section. Install:
+#
+#   helm upgrade --install sealfleet deploy/helm/sealfleet -n sealfleet --create-namespace \
+#     -f deploy/helm/sealfleet/values-k3s-local.yaml \
+#     --set postgresql.auth.password="$DB_PASSWORD"
+
+image:
+  registry: docker.io/library
+  tag: k3s-local
+  pullPolicy: Never
+
+# Locally-imported images exist only on this node.
+nodeSelector:
+  kubernetes.io/hostname: ebd-nano
+
+secrets:
+  create: false
+  existingSecret: sealfleet-platform-secrets
+
+postgresql:
+  enabled: true
+  persistence:
+    size: 5Gi
+
+migrate:
+  sqlImage: docker.io/library/sealfleet-migrate-sql:k3s-local
+  applySeeds: true
+  seedRuntimeApiKey: true
+
+registry:
+  replicas: 1
+router:
+  replicas: 1     # pipelines volume is ReadWriteOnce (local-path)
+  extraEnv:
+    # The demo-sandbox manifest names its own namespace; serve it from this one.
+    ENDPOINT_OVERRIDES: '{"demo-sandbox-mcp":"http://demo-sandbox-mcp:8080"}'
+portal:
+  replicas: 1
+  publicUrl: "http://192.168.50.64:30004"   # this node's LAN IP
+  service:
+    type: NodePort
+    nodePort: 30004
+
+coreAgent:
+  # Default to the on-cluster model; no cloud key is configured.
+  model: "local/default"
+llmProxy:
+  local:
+    # spark-infer (mistral.rs) OpenAI endpoint, model id "default".
+    baseUrl: "http://spark-router.spark-infer.svc.cluster.local:30000/v1"
+    model: "default"
+
+exampleMcps:
+  enabled: true
+
+ingress:
+  enabled: false
+backup:
+  enabled: false

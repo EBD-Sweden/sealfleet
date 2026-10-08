@@ -58,6 +58,8 @@ and the app: labels the NetworkPolicies select on).
 mcpfinder-portal
 {{- else if eq .component "core-agent" -}}
 core-agent
+{{- else if eq .component "llm-proxy" -}}
+llm-proxy
 {{- else -}}
 mcp-{{ .component }}
 {{- end -}}
@@ -119,4 +121,23 @@ Portal public URL (for NEXTAUTH_URL / AUTH_URL).
 {{- else -}}
 {{- printf "http://%s:%d" (include "mcpfinder.componentName" (dict "ctx" . "component" "portal")) (int .Values.portal.port) -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Pod scheduling (nodeSelector / tolerations / affinity) shared by every workload.
+Pin to the node(s) that hold locally-imported images, e.g. on single-node k3s.
+*/}}
+{{- define "mcpfinder.scheduling" -}}
+{{- with .Values.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
 {{- end -}}

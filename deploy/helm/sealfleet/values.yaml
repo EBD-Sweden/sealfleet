@@ -59,11 +59,8 @@ secrets:
   create: true
   # -- Name of an existing Secret to consume instead of creating one.
   #    Must contain: DATABASE_URL, ENCRYPTION_KEY, ROUTER_RS256_PRIVATE_KEY,
-  #    NEXTAUTH_SECRET.
+  #    NEXTAUTH_SECRET, RUNTIME_API_KEY, NEXTAUTH_RS256_PRIVATE_KEY.
   existingSecret: ""
-  # -- Shared operator key for portal/agent/llm-proxy; register it in api_keys
-  #    with allow_identity_delegation (see chart README).
-  runtimeApiKey: "CHANGE_ME_RUNTIME_API_KEY"
 
   # CHANGE-ME placeholders — never ship these to production.
   # -- Postgres connection string. Ignored when postgresql.enabled=true
@@ -78,6 +75,16 @@ secrets:
     CHANGE_ME_REPLACE_WITH_PEM_PRIVATE_KEY
   # -- NextAuth session secret for the portal. Generate: openssl rand -base64 32
   nextauthSecret: "CHANGE_ME_GENERATE_A_RANDOM_SECRET"
+  # -- Operator API key the portal, core-agent and llm-proxy present to the
+  #    router. Register it in api_keys with allow_identity_delegation (chart
+  #    README), or let the migrate Job seed it (migrate.seedRuntimeApiKey=true).
+  #    Generate: openssl rand -hex 32
+  runtimeApiKey: "CHANGE_ME_GENERATE_AN_OPERATOR_KEY"
+  # -- RS256 private key (PEM) the portal signs user JWTs with (the router
+  #    verifies them via the portal JWKS). The portal refuses ephemeral keys in
+  #    production. Generate: openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+  portalRs256PrivateKey: |
+    CHANGE_ME_REPLACE_WITH_PEM_PRIVATE_KEY
 
 # ---------------------------------------------------------------------------
 # Postgres. Toggle between an in-cluster eval Postgres and an external managed
@@ -123,6 +130,13 @@ migrate:
     ref: "main"
     # -- alpine/git image used by the clone init container.
     image: "alpine/git:latest"
+  # -- Take the SQL from a prebuilt image (db/Dockerfile, /sql/{db,scripts})
+  #    instead of cloning migrate.git — keeps the schema in lockstep with the
+  #    service images and works without network access to the repo.
+  sqlImage: ""
+  # -- Upsert secrets.runtimeApiKey into api_keys (tenant local-dev) so the
+  #    portal/core-agent can call the router. Mirrors the compose migrate step.
+  seedRuntimeApiKey: false
   # -- Apply seed files (db/seeds/*) in addition to migrations. Seeds include a
   #    demo sandbox + a local-dev operator API key; you may want this OFF in
   #    locked-down production and instead provision keys via the portal/API.
@@ -160,33 +174,6 @@ deploy:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: "1",  memory: 512Mi }
-
-# ---------------------------------------------------------------------------
-# Chat: core-agent (natural language → pipelines + platform ops) and llm-proxy
-# (single LLM entry point, token-gated with secrets.runtimeApiKey).
-# ---------------------------------------------------------------------------
-agent:
-  enabled: true
-  imageName: mcpfinder-agent
-  tag: ""
-  replicas: 1
-  port: 8050
-  chatModel: "anthropic/claude-sonnet-4-6"
-  resources:
-    requests: { cpu: 50m, memory: 128Mi }
-    limits: { cpu: 500m, memory: 256Mi }
-
-llmProxy:
-  enabled: true
-  imageName: mcpfinder-llm-proxy
-  tag: ""
-  replicas: 1
-  port: 3456
-  anthropicApiKey: ""
-  extraEnv: {}
-  resources:
-    requests: { cpu: 25m, memory: 64Mi }
-    limits: { cpu: 250m, memory: 128Mi }
 
 router:
   enabled: true
@@ -237,10 +224,76 @@ portal:
   # -- Public URL of the portal; used for NEXTAUTH_URL / AUTH_URL. Defaults to
   #    https://<ingress.hosts.portal> when empty and ingress is enabled.
   publicUrl: ""
+  # -- Service exposure. NodePort serves the UI on <nodeIP>:<nodePort> without
+  #    an ingress (also opens the portal NetworkPolicy to any source).
+  service:
+    type: ClusterIP
+    nodePort: ""
   extraEnv: {}
   resources:
     requests: { cpu: 200m, memory: 256Mi }
     limits:   { cpu: "1",  memory: 512Mi }
+
+coreAgent:
+  # -- The chat agent behind the portal's chat (pipelines + platform actions).
+  enabled: true
+  imageName: sealfleet-agent
+  tag: ""
+  replicas: 1
+  port: 8050
+  # -- Default planning model, routed through llm-proxy. "local/<model>" pins
+  #    the on-cluster model (llmProxy.local); the portal can override per chat.
+  model: "anthropic/claude-sonnet-4-6"
+  # -- Seconds for cloud-model calls (pinned local models get LOCAL_LLM_TIMEOUT).
+  llmTimeout: "8"
+  extraEnv: {}
+  #  LOCAL_LLM_TIMEOUT: "120"
+  #  LOCAL_LLM_MAX_TOKENS: "2048"
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: "1",  memory: 512Mi }
+
+llmProxy:
+  # -- OpenAI-compatible LLM entry point used by core-agent.
+  enabled: true
+  imageName: sealfleet-llm-proxy
+  tag: ""
+  replicas: 1
+  port: 3456
+  # -- On-cluster/on-box OpenAI-compatible model server. Requests for
+  #    "local/..." models are pinned here and never egress.
+  local:
+    baseUrl: ""        # e.g. http://spark-router.spark-infer.svc.cluster.local:30000/v1
+    model: ""
+    timeoutMs: "300000"
+  # -- Name of a Secret holding optional cloud fallbacks (ANTHROPIC_API_KEY,
+  #    AI_GATEWAY_API_KEY, CLAUDE_CODE_OAUTH_TOKEN). Empty = local only.
+  cloudSecret: ""
+  # -- Deprecated (v0.8.0): plain-value ANTHROPIC_API_KEY. Prefer cloudSecret.
+  anthropicApiKey: ""
+  extraEnv: {}
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
+
+exampleMcps:
+  # -- Example MCP servers (fake/public data) so the catalog and chat have
+  #    invocable tools out of the box. Image: mcps/Dockerfile.
+  enabled: false
+  imageName: sealfleet-example-mcps
+  tag: ""
+  servers:
+    weatherTrip:
+      enabled: true
+      name: weather-trip-mcp
+      app: mcps.weather_trip.main:app
+    demoSandbox:
+      enabled: true
+      name: demo-sandbox-mcp
+      app: mcps.demo_sandbox.main:app
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 500m, memory: 256Mi }
 
 # ---------------------------------------------------------------------------
 # Ingress + TLS. Reuses the k8s/tls/ patterns (Traefik by default; works with
@@ -320,6 +373,12 @@ containerSecurityContext:
   # can be enabled per-deployment once you have confirmed nothing else writes
   # under /app (see the chart README hardening notes).
   readOnlyRootFilesystem: false
+
+# -- Scheduling applied to every workload. Use nodeSelector to pin pods to the
+#    node(s) holding locally-imported images (e.g. k3s with imagePullPolicy Never).
+nodeSelector: {}
+tolerations: []
+affinity: {}
 
 # -- Common labels/annotations merged onto all resources.
 commonLabels: {}

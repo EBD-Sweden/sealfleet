@@ -27,6 +27,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "mcpfinder.scheduling" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if .Values.router.persistence.enabled }}
@@ -73,6 +74,10 @@ spec:
             {{- if .Values.deploy.enabled }}
             - name: DEPLOY_URL
               value: "http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "deploy") }}:{{ .Values.deploy.port }}"
+            {{- end }}
+            {{- if .Values.portal.enabled }}
+            - name: PORTAL_URL
+              value: "http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "portal") }}:{{ .Values.portal.port }}"
             {{- end }}
             - name: REQUIRE_AUTH
               value: {{ .Values.router.requireAuth | quote }}

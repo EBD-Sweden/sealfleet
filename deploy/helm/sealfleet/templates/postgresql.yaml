@@ -55,6 +55,7 @@ spec:
         app: {{ $name }}
         part-of: mcpfinder
     spec:
+      {{- include "mcpfinder.scheduling" . | nindent 6 }}
       containers:
         - name: postgres
           image: {{ .Values.postgresql.image | quote }}

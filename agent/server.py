@@ -781,6 +781,39 @@ def _history_block(history: list[dict], max_turns: int = 8, max_chars: int = 400
     )
 
 
+def _parse_selection(text: str) -> dict:
+    """Parse the selection JSON, salvaging the tool name when only the arguments
+    are malformed. Small local models sometimes echo the prompt's placeholder
+    and emit e.g. {"tool": "platform", "arguments": {"}} — the choice is still
+    right, and every argument has a default, so fall back to no arguments.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r'"tool"\s*:\s*(null|"([^"]+)")', text)
+        if not m:
+            raise
+        return {"tool": m.group(2), "arguments": {}}
+
+
+def _normalize_sentinel(name: str | None, pipeline_tools: list[dict]) -> str | None:
+    """Map a sentinel the model wrote without its underscores back to it.
+
+    Markdown-trained models read __platform__ as bold and answer "platform";
+    the selection then runs a pipeline that does not exist. A real pipeline of
+    that name still wins.
+    """
+    if not name or name in (PLATFORM_TOOL, CREATE_PIPELINE_TOOL):
+        return name
+    if any(t["name"] == name for t in pipeline_tools):
+        return name
+    bare = name.strip("_*` ").lower()
+    for sentinel in (PLATFORM_TOOL, CREATE_PIPELINE_TOOL):
+        if bare == sentinel.strip("_"):
+            return sentinel
+    return name
+
+
 async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: str | None = None, llm_headers: dict | None = None, history: list[dict] | None = None) -> tuple[str | None, dict, str]:
     """Single LLM call to select pipeline and extract arguments.
     Returns (pipeline_name, arguments, reasoning).
@@ -853,8 +886,8 @@ Return null ONLY when no tool's purpose relates to the question at all:
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else text[3:]
             text = text.rsplit("```", 1)[0]
-        result = json.loads(text.strip())
-        name = result.get("tool")
+        result = _parse_selection(text.strip())
+        name = _normalize_sentinel(result.get("tool"), pipeline_tools)
         args = result.get("arguments", {})
         if name:
             return name, args, f"LLM selected '{name}' with args {args}."

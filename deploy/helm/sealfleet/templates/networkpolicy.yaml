@@ -3,6 +3,8 @@
 {{- $deploy := include "mcpfinder.componentName" (dict "ctx" . "component" "deploy") }}
 {{- $registry := include "mcpfinder.componentName" (dict "ctx" . "component" "registry") }}
 {{- $portal := include "mcpfinder.componentName" (dict "ctx" . "component" "portal") }}
+{{- $agent := include "mcpfinder.componentName" (dict "ctx" . "component" "core-agent") }}
+{{- $proxy := include "mcpfinder.componentName" (dict "ctx" . "component" "llm-proxy") }}
 # Defense-in-depth NetworkPolicies (SOC 2 CC6.6/CC6.7). Mirrors
 # k8s/tls/networkpolicy.yaml. Enforced ONLY on a policy-aware CNI (Calico/
 # Cilium); a no-op on flannel. Egress is left open (DNS + external DB + APIs).
@@ -38,6 +40,7 @@ spec:
     - from:
         - podSelector: { matchLabels: { app: {{ $portal }} } }
         - podSelector: { matchLabels: { app: {{ $deploy }} } }
+        - podSelector: { matchLabels: { app: {{ $agent }} } }
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
@@ -104,13 +107,86 @@ spec:
       app: {{ $portal }}
   policyTypes: ["Ingress"]
   ingress:
+    {{- if ne .Values.portal.service.type "ClusterIP" }}
+    # Exposed directly (NodePort/LoadBalancer): any source may reach the UI port.
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.portal.port }}
+    {{- end }}
     - from:
+        # The router fetches the portal JWKS to validate user JWTs.
+        - podSelector: { matchLabels: { app: {{ $router }} } }
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
       ports:
         - protocol: TCP
           port: {{ .Values.portal.port }}
+{{- if .Values.coreAgent.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-allow-core-agent-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $agent }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: {{ $portal }} } }
+      ports:
+        - protocol: TCP
+          port: {{ .Values.coreAgent.port }}
+{{- end }}
+{{- if .Values.llmProxy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-allow-llm-proxy-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $proxy }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: {{ $agent }} } }
+        - podSelector: { matchLabels: { app: {{ $router }} } }
+      ports:
+        - protocol: TCP
+          port: {{ .Values.llmProxy.port }}
+{{- end }}
+{{- if .Values.exampleMcps.enabled }}
+---
+# Example MCP servers are only reached through the router.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "mcpfinder.fullname" . }}-allow-example-mcp-ingress
+  labels:
+    {{- include "mcpfinder.labels" . | nindent 4 }}
+    soc2-control: cc6.7
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: example-mcp
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: {{ $router }} } }
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}
 {{- if .Values.postgresql.enabled }}
 ---
 # In-cluster Postgres must accept connections from platform pods + the migrate
