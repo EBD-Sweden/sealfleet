@@ -1,0 +1,202 @@
+# Sealfleet chat benchmark. Fixed questions with known right answers, used to
+# compare planning models (7B baseline, bigger models, LoRA fine-tunes).
+#
+# Levels:
+#   select   — one selection call (agent._selection_prompt): which route, which args
+#   platform — first step of the platform loop (agent._platform_messages + the
+#              router's MCP control tools): which tool, which args. The call is
+#              NOT executed, so destructive intents are safe to test.
+#   e2e      — the full POST /ask, read-only questions only.
+#
+# Matching: `args` is a subset match — strings case-insensitive, lists must
+# contain the listed items, numbers compared numerically. `any_of` lists
+# acceptable alternatives. Do NOT reuse these questions as training data.
+
+select:
+  - id: wx-single
+    q: What is the weather in Stockholm?
+    route: weather_trip_planner
+    args: {cities: [Stockholm]}
+  - id: wx-compare
+    q: Which is warmer this week, Rome or Madrid?
+    route: weather_trip_planner
+    args: {cities: [Rome, Madrid]}
+  - id: wx-target-temp
+    q: I want about 25 degrees on my holiday — Lisbon, Athens or Nice?
+    route: weather_trip_planner
+    args: {cities: [Lisbon, Athens, Nice], target_temp_c: 25}
+  - id: wx-wind
+    q: Compare Oslo and Bergen but only if the wind stays under 15 km/h
+    route: weather_trip_planner
+    args: {cities: [Oslo, Bergen], max_wind_kph: 15}
+  - id: wx-swedish
+    q: Hur blir vädret i Göteborg och Malmö?
+    route: weather_trip_planner
+    args: {cities: {any_of: [[Göteborg, Malmö], [Gothenburg, Malmö], [Gothenburg, Malmo], [Göteborg, Malmo]]}}
+  - id: invoice
+    q: Review fake invoice INV-1001 for 4200 USD from Acme Ltd
+    route: demo_sandbox_invoice_review
+    args: {invoice_id: INV-1001, amount_usd: 4200, vendor_name: Acme Ltd}
+  - id: create-weather
+    q: Create a pipeline that fetches weather for Oslo and Bergen and ranks them
+    route: __create_pipeline__
+  - id: create-invoice
+    q: Build a new workflow that summarizes an invoice and then scores the vendor
+    route: __create_pipeline__
+  - id: create-named
+    q: Add a pipeline called nordic_weather that compares Helsinki, Tallinn and Riga
+    route: __create_pipeline__
+  - id: plat-mcps
+    q: List the MCP servers on the platform and the tools each one has.
+    route: __platform__
+  - id: plat-audit
+    q: show me the audit events from today
+    route: __platform__
+  - id: plat-job
+    q: Run the weather trip planner for Paris as a background job
+    route: __platform__
+  - id: plat-job-status
+    q: What's the status of job 7f3a9c?
+    route: __platform__
+  - id: plat-creds
+    q: Which credentials do I have stored?
+    route: __platform__
+  - id: plat-deploy
+    q: Deploy an MCP from https://github.com/acme/fx-mcp
+    route: __platform__
+  - id: plat-scale
+    q: Scale the weather-trip-mcp down to zero
+    route: __platform__
+  - id: plat-policy
+    q: Which policy rules are active right now?
+    route: __platform__
+  - id: plat-health
+    q: Is the platform healthy?
+    route: __platform__
+  - id: none-poem
+    q: Write me a short poem about the sea
+    route: null
+  - id: none-math
+    q: What is the capital of Australia?
+    route: null
+  - id: followup-city
+    history:
+      - {role: user, content: "What is the weather in Stockholm?"}
+      - {role: agent, content: "Stockholm: highs around 12°C, mostly cloudy, 3.8 h of sun per day."}
+    q: and Bergen?
+    route: weather_trip_planner
+    args: {cities: [Bergen]}
+  - id: followup-job
+    history:
+      - {role: user, content: "Run the weather trip planner for Paris as a background job"}
+      - {role: agent, content: "Started job 5d1e2a for weather_trip_planner (cities: Paris)."}
+    q: is it done yet?
+    route: __platform__
+
+platform:
+  - id: p-mcp-list
+    q: List the MCP servers on the platform
+    tool: mcp_list
+  - id: p-mcp-get
+    q: Show me the manifest for weather-trip-mcp
+    tool: mcp_get
+    args: {name: weather-trip-mcp}
+  - id: p-mcp-tools
+    q: What tools can I build pipelines from?
+    tool: mcp_tools
+  - id: p-health
+    q: Is the platform healthy?
+    tool: platform_status
+  - id: p-job-create
+    q: Run weather_trip_planner for Paris as a background job
+    tool: job_create
+    args: {pipeline: weather_trip_planner}
+  - id: p-job-get
+    q: What's the status of job 7f3a9c?
+    tool: job_get
+    args: {job_id: 7f3a9c}
+  - id: p-job-list
+    q: List my failed jobs
+    tool: job_list
+    args: {status: failed}
+  - id: p-job-cancel
+    q: Cancel job 42
+    tool: job_cancel
+    args: {job_id: "42"}
+  - id: p-audit
+    q: Show the last 5 audit events
+    tool: audit_events
+    args: {limit: 5}
+  - id: p-deploy
+    q: Deploy an MCP named fx-mcp from https://github.com/acme/fx-mcp
+    tool: mcp_deploy
+    args: {repo_url: https://github.com/acme/fx-mcp, name: fx-mcp}
+  - id: p-scale-down
+    q: Scale weather-trip-mcp down to zero
+    tool: scale_down
+    args: {mcp: weather-trip-mcp}
+  - id: p-scale-up
+    q: Wake up the demo-sandbox-mcp
+    tool: scale_up
+    args: {mcp: demo-sandbox-mcp}
+  - id: p-scale-status
+    q: Which MCPs are currently scaled to zero?
+    tool: scale_status
+  - id: p-policy-rules
+    q: Which policy rules are active?
+    tool: policy_rules
+  - id: p-policy-check
+    q: Would calling fetch_cities_weather on weather-trip-mcp be allowed by policy?
+    tool: policy_check
+    args: {mcp: weather-trip-mcp, tool: fetch_cities_weather}
+  - id: p-pipeline-list
+    q: Which v2 pipelines exist?
+    tool: pipeline_list
+  - id: p-pipeline-get
+    q: Show me the definition of the weather_trip_planner pipeline
+    tool: pipeline_get
+    args: {name: weather_trip_planner}
+  - id: p-pipeline-run
+    q: Run the weather_trip_planner pipeline for Rome now and give me the result
+    tool: {any_of: [pipeline_run]}
+    args: {name: weather_trip_planner}
+  - id: p-pipeline-delete
+    q: Delete the pipeline nordic_weather
+    tool: pipeline_delete
+    args: {name: nordic_weather}
+  - id: p-cred-list
+    q: List my credentials
+    tool: credential_list
+  - id: p-cred-create
+    q: "Store my Binance API key as binance-key, the value is abc123secret"
+    tool: credential_create
+    args: {name: binance-key}
+  - id: p-tool-invoke
+    q: Call fetch_cities_weather on weather-trip-mcp directly for Oslo
+    tool: tool_invoke
+    args: {mcp: weather-trip-mcp, tool: fetch_cities_weather}
+  - id: p-deployments
+    q: Which MCPs were deployed through the deploy service?
+    tool: mcp_deployments
+  - id: p-registry-export
+    q: Export the registry bundle
+    tool: registry_export
+
+# Read-only end-to-end checks through POST /ask. `expect_in_answer` is a list
+# of substrings (case-insensitive) the answer must contain.
+e2e:
+  - id: e2e-weather
+    q: What is the weather in Stockholm?
+    output_type: weather_trip_planner
+    expect_in_answer: [Stockholm]
+  - id: e2e-mcps
+    q: List the MCP servers on the platform and the tools each one has.
+    output_type: platform
+    expect_in_answer: [weather-trip-mcp, demo-sandbox-mcp]
+  - id: e2e-pipelines
+    q: Which v2 pipelines exist on the platform?
+    output_type: platform
+    expect_in_answer: [weather_trip_planner]
+  - id: e2e-health
+    q: Is the platform healthy?
+    output_type: platform

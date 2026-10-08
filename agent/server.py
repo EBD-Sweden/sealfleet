@@ -507,26 +507,9 @@ def _as_openai_tools(mcp_tools: list[dict]) -> list[dict]:
     } for t in mcp_tools]
 
 
-async def run_platform_loop(
-    question: str, identity: dict, model: str | None, llm_headers: dict | None,
-    history: list[dict] | None = None,
-) -> tuple[str, list[str], list[dict]]:
-    """Let the model operate the platform through the MCP control server.
-
-    Standard tool-calling loop: the model picks a tool, we execute it via
-    tools/call with the user's identity, feed the result back, repeat until
-    it answers or the step cap is hit. Returns (answer, tools_called, steps).
-    """
-    mcp = McpControlClient(identity)
-    await mcp.initialize()
-    mcp_tools = await mcp.list_tools()
-    tools = _as_openai_tools(mcp_tools)
-    read_only = {t["name"] for t in mcp_tools
-                 if (t.get("annotations") or {}).get("readOnlyHint")}
-
-    selected = model or OPENAI_MODEL
-    generous = needs_generous_budget(selected)
-    messages = [
+def _platform_messages(question: str, history: list[dict] | None = None) -> list[dict]:
+    """Opening messages of the platform loop (shared with agent/eval and training data)."""
+    return [
         {"role": "system", "content": (
             "You operate the Sealfleet platform for the user through the tools "
             "provided. Call tools to find out or change things; do not guess. "
@@ -546,6 +529,28 @@ async def run_platform_loop(
         ],
         {"role": "user", "content": question},
     ]
+
+
+async def run_platform_loop(
+    question: str, identity: dict, model: str | None, llm_headers: dict | None,
+    history: list[dict] | None = None,
+) -> tuple[str, list[str], list[dict]]:
+    """Let the model operate the platform through the MCP control server.
+
+    Standard tool-calling loop: the model picks a tool, we execute it via
+    tools/call with the user's identity, feed the result back, repeat until
+    it answers or the step cap is hit. Returns (answer, tools_called, steps).
+    """
+    mcp = McpControlClient(identity)
+    await mcp.initialize()
+    mcp_tools = await mcp.list_tools()
+    tools = _as_openai_tools(mcp_tools)
+    read_only = {t["name"] for t in mcp_tools
+                 if (t.get("annotations") or {}).get("readOnlyHint")}
+
+    selected = model or OPENAI_MODEL
+    generous = needs_generous_budget(selected)
+    messages = _platform_messages(question, history)
     called: list[str] = []
     steps: list[dict] = []
     failures: dict[str, int] = {}          # (tool, args) → consecutive failures
@@ -781,6 +786,45 @@ def _history_block(history: list[dict], max_turns: int = 8, max_chars: int = 400
     )
 
 
+def _selection_prompt(question: str, pipeline_tools: list[dict], history: list[dict] | None = None) -> str:
+    """The pipeline-selection prompt (shared with agent/eval and training data)."""
+    def _args(t: dict) -> str:
+        props = t.get("inputSchema", {}).get("properties", {}) or {}
+        parts = []
+        for k, v in props.items():
+            spec = f"{k}: {v.get('type', 'string')}"
+            if "default" in v:
+                spec += f" [default {json.dumps(v['default'])}]"
+            parts.append(spec)
+        return ", ".join(parts) or "none"
+
+    tools_desc = "\n".join(
+        f"- {t['name']}: {t['description']} (args — {_args(t)})"
+        for t in pipeline_tools
+    )
+    return f"""Available pipeline tools:
+{tools_desc}
+- {CREATE_PIPELINE_TOOL}: build and register a NEW pipeline. Choose this only
+  when the user asks to create, build, add or define a pipeline or workflow —
+  never to answer a question an existing tool already covers.
+- {PLATFORM_TOOL}: manage or inspect the platform itself — which MCP servers
+  are registered, register/deploy an MCP, run something as a background job
+  and check it, list/create credentials, policy rules, audit events, scaling.
+  Choose this for any question ABOUT the platform rather than about data.
+
+{("Recent conversation (for context — resolve references like \"there\" or \"it\"):\n" + _history_block(history) + "\n") if history else ""}User question: "{question}"
+
+Respond with ONLY valid JSON (no markdown):
+{{"tool": "<tool_name>", "arguments": {{"<param>": "<value>"}}}}
+
+Pick the tool whose purpose covers the question's topic. Every argument has a
+default, so never return null because the question omits one. Include ONLY the
+arguments the question explicitly states; OMIT every other argument so its
+default applies — never invent a number, and never pass 0 as a placeholder.
+Return null ONLY when no tool's purpose relates to the question at all:
+{{"tool": null, "arguments": {{}}}}"""
+
+
 def _parse_selection(text: str) -> dict:
     """Parse the selection JSON, salvaging the tool name when only the arguments
     are malformed. Small local models sometimes echo the prompt's placeholder
@@ -819,41 +863,7 @@ async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: 
     Returns (pipeline_name, arguments, reasoning).
     Times out after LLM_TIMEOUT seconds → returns (None, {}, '').
     """
-    def _args(t: dict) -> str:
-        props = t.get("inputSchema", {}).get("properties", {}) or {}
-        parts = []
-        for k, v in props.items():
-            spec = f"{k}: {v.get('type', 'string')}"
-            if "default" in v:
-                spec += f" [default {json.dumps(v['default'])}]"
-            parts.append(spec)
-        return ", ".join(parts) or "none"
-
-    tools_desc = "\n".join(
-        f"- {t['name']}: {t['description']} (args — {_args(t)})"
-        for t in pipeline_tools
-    )
-    prompt = f"""Available pipeline tools:
-{tools_desc}
-- {CREATE_PIPELINE_TOOL}: build and register a NEW pipeline. Choose this only
-  when the user asks to create, build, add or define a pipeline or workflow —
-  never to answer a question an existing tool already covers.
-- {PLATFORM_TOOL}: manage or inspect the platform itself — which MCP servers
-  are registered, register/deploy an MCP, run something as a background job
-  and check it, list/create credentials, policy rules, audit events, scaling.
-  Choose this for any question ABOUT the platform rather than about data.
-
-{("Recent conversation (for context — resolve references like \"there\" or \"it\"):\n" + _history_block(history) + "\n") if history else ""}User question: "{question}"
-
-Respond with ONLY valid JSON (no markdown):
-{{"tool": "<tool_name>", "arguments": {{"<param>": "<value>"}}}}
-
-Pick the tool whose purpose covers the question's topic. Every argument has a
-default, so never return null because the question omits one. Include ONLY the
-arguments the question explicitly states; OMIT every other argument so its
-default applies — never invent a number, and never pass 0 as a placeholder.
-Return null ONLY when no tool's purpose relates to the question at all:
-{{"tool": null, "arguments": {{}}}}"""
+    prompt = _selection_prompt(question, pipeline_tools, history)
 
     selected = model or OPENAI_MODEL
     generous = needs_generous_budget(selected)
