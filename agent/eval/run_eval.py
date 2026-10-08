@@ -16,7 +16,9 @@ core-agent pod:
 Options: --levels select,platform,e2e  --repeat N  --concurrency N  --only <id-prefix>
          --base-url URL   call this OpenAI-compatible engine directly instead of
                           llm-proxy (select/platform only), e.g. a model under test
-         --no-think       prepend "/no_think" (Nemotron-style reasoning toggle)
+         --no-think       prepend "/no_think" (Nemotron-Nano-v2 reasoning toggle)
+         --extra-body J   JSON merged into every request, e.g. '{"enable_thinking": false}'
+                          (Nemotron-3 / Qwen3 template flag)
 """
 
 from __future__ import annotations
@@ -214,6 +216,7 @@ async def main() -> int:
     ap.add_argument("--out", default="")
     ap.add_argument("--base-url", default="")
     ap.add_argument("--no-think", action="store_true")
+    ap.add_argument("--extra-body", default="")
     opts = ap.parse_args()
 
     if opts.base_url:
@@ -226,6 +229,14 @@ async def main() -> int:
         server.needs_generous_budget = lambda _m: True
     if opts.no_think:
         _wrap_no_think()
+    if opts.extra_body:
+        extra = json.loads(opts.extra_body)
+        create = server.llm.chat.completions.create
+
+        async def with_extra(**kw):
+            return await create(**{**kw, "extra_body": {**(kw.get("extra_body") or {}), **extra}})
+
+        server.llm.chat.completions.create = with_extra
 
     cases = yaml.safe_load(Path(opts.cases).read_text())
     identity = {"X-API-Key": server.ROUTER_API_KEY}
@@ -260,7 +271,7 @@ async def main() -> int:
     wall = time.time() - wall
 
     summary = {"model": opts.model, "base_url": opts.base_url or "llm-proxy",
-               "no_think": opts.no_think, "wall_s": round(wall, 1), "concurrency": opts.concurrency, "levels": {}}
+               "no_think": opts.no_think, "extra_body": opts.extra_body or None, "wall_s": round(wall, 1), "concurrency": opts.concurrency, "levels": {}}
     for level in LEVELS:
         rs = [r for r in results if r["level"] == level]
         if not rs:

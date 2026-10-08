@@ -24,3 +24,22 @@ Run the generator where `agent/server.py` imports (openai, httpx, pyyaml),
 e.g. the `sealfleet-runtime` image with `pip install -r agent/requirements.txt`.
 
 Measure before/after with `agent/eval/run_eval.py`.
+
+## Training (Nemotron-3-Nano-30B-A3B, one GB10)
+
+    CONFIG=lora_nemotron3_30b_hf.yaml agent/train/run_lora.sh <run-name>
+
+`run_lora.sh` runs nemo-automodel **26.06** (26.02's Mamba kernels are x86-only)
+with a host-memory cgroup cap plus a MemAvailable watchdog: on GB10 the GPU
+shares the 121 GB pool and CUDA allocations are not charged to the cgroup.
+Pitfalls this setup works around:
+
+- automodel's custom NemotronH loads the full state dict on CPU before copying
+  it to the GPU (60 + 60 GB) and cannot fit; `lora_nemotron3_30b_hf.yaml` uses
+  the HF class (`force_hf`), which streams to the GPU (~70 GB peak).
+- 26.06's ChatDataset serialises tool-call arguments to strings; the Nemotron
+  template needs dicts → `sealfleet_chat_dataset.ChatDataset`.
+- The PEFT meta-device build aliases `lm_head` to the input embeddings
+  although the model is untied (step-0 loss ~12.6) → `train_sealfleet.py`
+  unties it and loads the checkpoint lm_head (step-0 loss ~1.9). `lm_head` is
+  excluded from LoRA.

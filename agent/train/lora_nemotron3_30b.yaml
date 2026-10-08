@@ -1,0 +1,98 @@
+# LoRA SFT of Nemotron-3-Nano-30B-A3B on the Sealfleet planner data, one GB10.
+# Based on nemo-automodel 26.06 examples/llm_finetune/nemotron/nemotron_nano_v3_singlegpu_lora.yaml.
+# Paths are container paths; agent/train/run_lora.sh mounts them. Override any
+# key on the command line, e.g. --step_scheduler.max_steps=20 for a smoke run.
+
+recipe: TrainFinetuneRecipeForNextTokenPrediction
+
+step_scheduler:
+  global_batch_size: 16          # grad accumulation over local_batch_size 1
+  local_batch_size: 1
+  max_steps: 400                 # ~1 epoch of sealfleet-tools-v1-nemotron3 (6,510 rows)
+  ckpt_every_steps: 100
+  val_every_steps: 100
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 10
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 1111
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: /models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  backend:
+    _target_: nemo_automodel.components.models.common.BackendConfig
+    rms_norm: torch_fp32
+    linear: torch
+    dispatcher: torch
+
+compile:
+  enabled: false
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: /out/checkpoints
+  model_save_format: safetensors
+  save_consolidated: final
+
+peft:
+  _target_: nemo_automodel.components._peft.lora.PeftConfig
+  exclude_modules: ["*.out_proj", "lm_head"]  # mamba out_proj uses custom kernels; keep the output head frozen
+  dim: 16
+  alpha: 32
+  use_triton: True
+  use_memory_efficient_lora: True
+
+distributed:
+  strategy: fsdp2
+  dp_size: 1
+  tp_size: 1
+  cp_size: 1
+  ep_size: 1
+  sequence_parallel: false
+  activation_checkpointing: true
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.masked_ce.MaskedCrossEntropy
+
+# Loss is on the final assistant turn only (ChatDataset); the data is
+# generated with --expand-turns so every assistant turn is a final turn once.
+dataset:
+  _target_: sealfleet_chat_dataset.ChatDataset  # keeps tool-call args as dicts
+  path_or_dataset_id: /data/train.jsonl
+  seq_length: 5120
+  truncation: true
+
+packed_sequence:
+  packed_sequence_size: 0
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+  shuffle: true
+
+validation_dataset:
+  _target_: sealfleet_chat_dataset.ChatDataset  # keeps tool-call args as dicts
+  path_or_dataset_id: /data/val.jsonl
+  seq_length: 5120
+  truncation: true
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+optimizer:
+  _target_: torch.optim.AdamW
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  lr: 1.0e-4
+  weight_decay: 0.0
+
+lr_scheduler:
+  lr_decay_style: cosine
+  lr_warmup_steps: 20
+  min_lr: 1.0e-5
