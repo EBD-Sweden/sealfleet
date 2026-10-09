@@ -60,10 +60,14 @@ llm = AsyncOpenAI(
     timeout=httpx.Timeout(max(LLM_TIMEOUT, LOCAL_LLM_TIMEOUT), connect=3.0),
 )
 
-# Prepended to the system turn of every request to a "local/" model, e.g.
-# "/no_think" to switch off Nemotron's reasoning (the Sealfleet LoRA data in
-# agent/train is generated with it). Cloud and byo models never get it.
+# Request shaping for "local/" models only (cloud and byo models never get it):
+#   LOCAL_LLM_SYSTEM_PREFIX  prepended to the system turn, e.g. "/no_think" for
+#                            Nemotron-Nano-v2 (agent/train data uses it).
+#   LOCAL_LLM_EXTRA_BODY     JSON merged into the request body, e.g.
+#                            '{"enable_thinking": false}' for Nemotron-3 / Qwen3
+#                            chat templates (the Sealfleet LoRA is trained so).
 LOCAL_LLM_SYSTEM_PREFIX = os.getenv("LOCAL_LLM_SYSTEM_PREFIX", "")
+LOCAL_LLM_EXTRA_BODY = json.loads(os.getenv("LOCAL_LLM_EXTRA_BODY", "") or "{}")
 
 
 def _with_system_prefix(messages: list[dict], prefix: str) -> list[dict]:
@@ -72,15 +76,18 @@ def _with_system_prefix(messages: list[dict], prefix: str) -> list[dict]:
     return [{"role": "system", "content": prefix}, *messages]
 
 
-if LOCAL_LLM_SYSTEM_PREFIX:
+if LOCAL_LLM_SYSTEM_PREFIX or LOCAL_LLM_EXTRA_BODY:
     _create = llm.chat.completions.create
 
-    async def _create_with_prefix(**kw):
+    async def _create_for_local(**kw):
         if str(kw.get("model") or OPENAI_MODEL).startswith("local/"):
-            kw["messages"] = _with_system_prefix(kw["messages"], LOCAL_LLM_SYSTEM_PREFIX)
+            if LOCAL_LLM_SYSTEM_PREFIX:
+                kw["messages"] = _with_system_prefix(kw["messages"], LOCAL_LLM_SYSTEM_PREFIX)
+            if LOCAL_LLM_EXTRA_BODY:
+                kw["extra_body"] = {**(kw.get("extra_body") or {}), **LOCAL_LLM_EXTRA_BODY}
         return await _create(**kw)
 
-    llm.chat.completions.create = _create_with_prefix
+    llm.chat.completions.create = _create_for_local
 
 http = httpx.AsyncClient(
     timeout=20.0,
