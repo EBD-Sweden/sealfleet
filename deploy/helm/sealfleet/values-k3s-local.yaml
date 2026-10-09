@@ -61,6 +61,12 @@ portal:
 coreAgent:
   # Default to the on-cluster model; no cloud key is configured.
   model: "local/default"
+  extraEnv:
+    # spark-infer serves the Sealfleet LoRA of Nemotron-3-Nano-30B, trained with
+    # reasoning off; its chat template switches that with enable_thinking. Pass
+    # it as chat_template_kwargs: spark-router (sglang smg) drops a top-level
+    # enable_thinking field but forwards chat_template_kwargs to the worker.
+    LOCAL_LLM_EXTRA_BODY: '{"chat_template_kwargs": {"enable_thinking": false}}'
 llmProxy:
   local:
     # spark-infer (mistral.rs) OpenAI endpoint, model id "default".

@@ -64,8 +64,10 @@ llm = AsyncOpenAI(
 #   LOCAL_LLM_SYSTEM_PREFIX  prepended to the system turn, e.g. "/no_think" for
 #                            Nemotron-Nano-v2 (agent/train data uses it).
 #   LOCAL_LLM_EXTRA_BODY     JSON merged into the request body, e.g.
-#                            '{"enable_thinking": false}' for Nemotron-3 / Qwen3
-#                            chat templates (the Sealfleet LoRA is trained so).
+#                            '{"chat_template_kwargs": {"enable_thinking": false}}'
+#                            for Nemotron-3 / Qwen3 templates (the Sealfleet LoRA
+#                            is trained so). Use chat_template_kwargs: spark-router
+#                            drops a top-level enable_thinking.
 LOCAL_LLM_SYSTEM_PREFIX = os.getenv("LOCAL_LLM_SYSTEM_PREFIX", "")
 LOCAL_LLM_EXTRA_BODY = json.loads(os.getenv("LOCAL_LLM_EXTRA_BODY", "") or "{}")
 
