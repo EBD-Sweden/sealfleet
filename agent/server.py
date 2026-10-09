@@ -530,6 +530,34 @@ def _as_openai_tools(mcp_tools: list[dict]) -> list[dict]:
     } for t in mcp_tools]
 
 
+_TOOL_MARKUP = re.compile(r"<tool_call>|<function=|<TOOLCALL>")
+_TOOL_MARKUP_NAME = re.compile(r"<function=([\w.-]+)>|\"name\"\s*:\s*\"([\w.-]+)\"")
+# Claims of having changed state: "I've started…", "has been deleted", "is now
+# scaled", or a summary-style sentence opening with the verb ("Started job …").
+# Explanations ("scaling stops its pods", "keys are stored encrypted") don't match.
+_CLAIM_VERBS = (r"(started|queued|created|deployed|registered|deleted|removed|cancel+ed|scaled|stored|saved|"
+                r"reloaded|updated|deactivated|invoked|launched|submitted)")
+_ACTION_CLAIM = re.compile(
+    r"\b(?:I(?:'ve| have)?|has been|have been|is now|are now|was)\s+(?:\w+\s+){0,2}" + _CLAIM_VERBS + r"\b"
+    r"|(?:^|[.!]\s+)" + _CLAIM_VERBS + r"\s+(?:the\s+|a\s+|your\s+)?(?:job|pipeline|mcp|server|credential|secret)\b",
+    re.IGNORECASE)
+
+
+def _answer_needs_correction(answer: str, succeeded_writes, schemas: dict) -> str | None:
+    """Correction message for a final answer that must not reach the user, or None."""
+    if _TOOL_MARKUP.search(answer):
+        names = [a or b for a, b in _TOOL_MARKUP_NAME.findall(answer)]
+        unknown = [n for n in names if n not in schemas]
+        what = f"'{unknown[0]}' is not one of your tools" if unknown else "that tool call was not valid"
+        return (f"Your last reply contained tool-call markup instead of a tool call: {what}. "
+                f"Available tools: {', '.join(sorted(schemas))}. Call the right tool, or answer in plain text.")
+    if not succeeded_writes and _ACTION_CLAIM.search(answer):
+        return ("You said you changed something, but you have not called any tool in this turn, so nothing "
+                "happened. If the user asked for that action, call the tool now. Otherwise answer without "
+                "claiming to have done it.")
+    return None
+
+
 def _repair_tool_args(args: dict, schema: dict | None) -> dict:
     """Fix the one argument-name slip models make against MCP tool schemas.
 
@@ -599,6 +627,7 @@ async def run_platform_loop(
     steps: list[dict] = []
     failures: dict[str, int] = {}          # (tool, args) → consecutive failures
     write_results: dict[str, str] = {}     # completed writes → their result
+    corrected = False
 
     def _key(name: str, args: dict) -> str:
         return name + ":" + json.dumps(args, sort_keys=True, default=str)
@@ -618,6 +647,18 @@ async def run_platform_loop(
         tool_calls = msg.tool_calls or []
         if not tool_calls:
             answer = (msg.content or "").strip()
+            # Self-check before answering, once per turn: tool-call markup in
+            # the text (a call to a tool that doesn't exist, returned raw by
+            # the engine) or a claim of having changed something although no
+            # write ran this turn. Either way the user would get a false or
+            # unusable answer, so give the model one correction and continue.
+            correction = None if corrected else _answer_needs_correction(answer, write_results, schemas)
+            if correction:
+                corrected = True
+                messages.append({"role": "assistant", "content": answer})
+                messages.append({"role": "user", "content": correction})
+                steps.append({"tool": None, "self_check": correction[:200]})
+                continue
             if not answer:
                 answer = "I ran the requested platform operations but the model produced no summary."
             return answer, called, steps

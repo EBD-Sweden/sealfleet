@@ -80,3 +80,41 @@ def test_repair_leaves_ambiguous_or_valid_args_alone():
     assert server._repair_tool_args({"x": 1, "y": 2}, SCHEMA_MCP_GET) == {"x": 1, "y": 2}
     assert server._repair_tool_args({}, SCHEMA_DEPLOY) == {}
     assert server._repair_tool_args({"mcp": "a"}, None) == {"mcp": "a"}
+
+
+SCHEMAS = {"job_create": {}, "tool_invoke": {}, "job_get": {}}
+
+
+def test_self_check_flags_claimed_action_without_a_write():
+    msg = server._answer_needs_correction("Started job 3421888888888888 (uptime_report, queued).", set(), SCHEMAS)
+    assert msg and "not called any tool" in msg
+
+
+def test_self_check_allows_claims_backed_by_a_write():
+    assert server._answer_needs_correction("Started job abc (queued).", {"job_create:{}"}, SCHEMAS) is None
+
+
+def test_self_check_flags_leaked_tool_markup_naming_an_unknown_tool():
+    msg = server._answer_needs_correction("<tool_call>\n<function=tool_call>\n</function>\n</tool_call>", set(), SCHEMAS)
+    assert msg and "'tool_call' is not one of your tools" in msg and "tool_invoke" in msg
+
+
+def test_self_check_passes_plain_answers_and_questions():
+    assert server._answer_needs_correction("Which pipeline should I delete? I can see: a, b.", set(), SCHEMAS) is None
+    assert server._answer_needs_correction("There are 3 MCP servers registered: a, b, c.", set(), SCHEMAS) is None
+    assert server._answer_needs_correction(
+        "Scaling x to zero stops its pods; nothing is deleted. I haven't done anything.", set(), SCHEMAS) is None
+
+
+def test_self_check_ignores_explanations_with_past_participles():
+    for text in ["Credentials are encrypted at rest; a key that is stored here is never shown to the model.",
+                 "Deleting removes a runtime-authored pipeline's definition; shipped examples are protected.",
+                 "Cancelling ends a queued or running job; finished steps aren't rolled back.",
+                 "I haven't done anything — say \"scale x down\" if you want me to."]:
+        assert server._answer_needs_correction(text, set(), SCHEMAS) is None, text
+
+
+def test_self_check_catches_first_person_and_summary_claims():
+    for text in ["I've deleted the pipeline nordic_weather.", "The MCP has been deployed.",
+                 "Deleted the pipeline old.", "fx-mcp is now scaled down to zero."]:
+        assert server._answer_needs_correction(text, set(), SCHEMAS), text

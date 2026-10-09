@@ -315,6 +315,18 @@ def entity_ctx(gens: dict | None = None, pipeline_names: list[str] | None = None
             "name": pick(SYNTH_PIPELINES) + "_" + pick(["v2", "daily", "eu", "test"])}
 
 
+# How an EARLIER turn reported a started job, as it appears in history. Varied
+# and unlike the post-tool summaries, so the model doesn't learn to emit
+# "Started job <id>" as a reply without calling job_create.
+JOB_HISTORY = ["Your job {j} is queued.", "{p} is running in the background as job {j}.",
+               "Okay — queued it, the job id is {j}.", "Job {j} accepted; it's running now.",
+               "It's running as a background job ({j}).", "Queued: {j} ({p})."]
+
+
+def job_history(j: str, p: str) -> str:
+    return pick(JOB_HISTORY).format(j=j, p=p)
+
+
 def selection_target(tool, args) -> str:
     return json.dumps({"tool": tool, "arguments": args or {}}, ensure_ascii=False)
 
@@ -347,7 +359,29 @@ def gen_select(real_tools: list[dict], mcps: list[str]) -> dict:
     else:  # follow-up with history
         name, q0, args0 = gen_pipeline_question(gens)
         sub = random.random()
-        if sub < 0.4 and "cities" in args0:
+        first_str = next(((k, v) for k, v in args0.items() if isinstance(v, str)), None)
+        handled = False
+        if sub < 0.25 and first_str and "cities" not in args0:
+            # "and X?" for any pipeline: same pipeline, new value for its main argument.
+            k = first_str[0]
+            for _ in range(10):
+                _, q1, args1 = gen_pipeline_question({name: gens[name]})
+                if isinstance(args1.get(k), str) and args1[k] != args0[k]:
+                    break
+            else:
+                args1 = None
+            if args1:
+                history = [{"role": "user", "content": q0},
+                           {"role": "agent", "content": f"Here's the result for {args0[k]}."}]
+                q = random.choice([f"and {args1[k]}?", f"what about {args1[k]}?", f"same for {args1[k]}",
+                                   f"now {args1[k]}", f"och {args1[k]}?"])
+                target = (name, {k: args1[k]})
+                handled = True
+            else:
+                sub = 0.9
+        if handled:
+            pass
+        elif sub < 0.4 and "cities" in args0:
             new = [c for c in city_list(3) if c not in args0["cities"]][:1]
             history = [{"role": "user", "content": q0},
                        {"role": "agent", "content": f"Here is the forecast for {join_and(args0['cities'])}: mostly mild."}]
@@ -356,7 +390,7 @@ def gen_select(real_tools: list[dict], mcps: list[str]) -> dict:
         elif sub < 0.7:
             j = hexid()
             history = [{"role": "user", "content": f"Run {name} as a background job"},
-                       {"role": "agent", "content": f"Started job {j} for {name}."}]
+                       {"role": "agent", "content": job_history(j, name)}]
             q = random.choice(["is it done?", "is it done yet?", "status?", "did it finish?", "check on that job",
                                "what was the result?", "any update on the job?"])
             target = (PLATFORM, {})
@@ -569,7 +603,9 @@ PHRASES = {
     "pipeline_run": ["Run the {p} pipeline for {x} now and give me the result", "Execute {p} synchronously for {x}",
                      "Run {p} for {x} right away and wait for it"],
     "tool_invoke": ["Call {tool} on {m} directly", "Invoke {m}.{tool} with no inputs", "Directly run the {tool} tool on {m}",
-                    "Call the {tool} tool of {m}"],
+                    "Call the {tool} tool of {m}", "Skip the pipeline and hit {m}'s {tool} tool", "raw tool call: {m} {tool}",
+                    "Use {tool} from {m} directly, not through a pipeline", "Execute the {tool} tool on {m}",
+                    "Try {m}.{tool} by itself", "I want to test {tool} on {m} on its own", "Kör {tool} direkt på {m}"],
     "registry": ["Export the registry", "Give me a registry export", "Dump the registry bundle", "Export all registry data"],
 }
 PLATFORM_KIND_WEIGHTS = {"job": 0.24, "job_status": 0.12, "job_list": 0.04, "job_cancel": 0.03, "mcps": 0.07,
@@ -605,7 +641,7 @@ def platform_case(catalog: dict, pipeline_names: list[str], mcps: list[str]) -> 
     if kind == "job_status":
         if random.random() < 0.5:
             hist = [{"role": "user", "content": fill(pick(PHRASES["job"]), ctx)},
-                    {"role": "assistant", "content": f"Started job {j} ({p}, queued)."}]
+                    {"role": "assistant", "content": job_history(j, p)}]
             return say("job_status_hist"), [("job_get", {"job_id": j})], hist
         return say("job_status"), [("job_get", {"job_id": j})], None
     if kind == "job_list":
@@ -795,7 +831,7 @@ EXPLAIN_ACTIONS = [
 ]
 RESOLVE = [
 
-    ("job_cancel", "Run {p} as a background job", "Started job {j} ({p}, queued).",
+    ("job_cancel", "Run {p} as a background job", "Your job {j} is running in the background.",
      ["cancel it", "actually, stop that job", "never mind, kill it"], lambda c: {"job_id": c["j"]}),
     ("scale_down", "Is {m} scaled to zero?", "{m} is running with 1 replica.",
      ["ok, scale it down then", "put it to sleep", "scale that one down"], lambda c: {"mcp": c["m"]}),
