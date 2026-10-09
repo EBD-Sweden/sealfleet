@@ -670,6 +670,144 @@ def platform_case(catalog: dict, pipeline_names: list[str], mcps: list[str]) -> 
     return say("registry"), [("registry_export", {})], None
 
 
+# ---------------------------------------------------------------------------
+# Guarded platform behaviour: ask when a write lacks its target, explain when
+# the user asks a question, act when history already names the target.
+# Without these the fine-tune learned "always call a tool" and invented
+# arguments for vague deletes/deploys (agent/eval/cases_hard.yaml).
+# ---------------------------------------------------------------------------
+
+VAGUE = {
+    "pipeline_delete": (["remove the pipeline I made yesterday", "get rid of that test pipeline", "delete my pipeline",
+                         "drop the old workflow", "can you clean up the pipeline I don't use anymore",
+                         "nuke the broken pipeline", "please delete the duplicate workflow", "remove one of my pipelines",
+                         "the pipeline from last week isn't needed, delete it", "trash the experimental pipeline",
+                         "Ta bort min gamla pipeline"],
+                        "pipeline_list", "Which pipeline should I delete? I can see: {opts}. Shipped examples are protected."),
+    "job_cancel": (["stop my job", "kill the running one", "cancel that background run", "abort what's running",
+                    "something is stuck, cancel it", "halt the job that's been running forever", "stop the background thing",
+                    "please cancel my run", "Avbryt jobbet som kör"],
+                   "job_list", "Which job should I cancel? Running jobs: {opts}."),
+    "scale_down": (["scale it down", "put the server to sleep", "turn off the MCP we aren't using",
+                    "save some resources, scale something down", "shut down the idle one", "sleep the unused server"],
+                   "mcp_list", "Which MCP should I scale down to zero? Registered: {opts}."),
+    "mcp_deploy": (["push my new MCP live", "deploy the server I wrote", "ship my integration to the platform",
+                    "get my MCP deployed please", "I finished my MCP, put it on the platform", "deploy the new tool server",
+                    "can you roll out my MCP?", "launch my integration", "Driftsätt min MCP"], None,
+                   "Sure — what's the git repository URL, and what name should the MCP get?"),
+    "mcp_register": (["register my server", "hook up the MCP I'm running locally", "add my running service to the router",
+                      "connect the MCP that's already up", "make the platform aware of my server"], None,
+                     "What's its endpoint URL, the name to register it under, and which tools it exposes?"),
+    "credential_create": (["save my exchange key", "add my API token", "store a secret for the binance MCP",
+                           "I need to give the kraken MCP my key", "set up credentials for my trading bot",
+                           "add a password for the crm integration", "keep my OpenAI key somewhere safe"], None,
+                          "Happy to — what name should the credential have? For the value, the portal's credential "
+                          "form keeps the secret out of this chat; if you paste it here I'll store it encrypted and "
+                          "won't repeat it."),
+}
+EXPLAIN = [
+    ("what happens to running calls if {m} gets scaled to zero?",
+     "Calls already in flight finish; afterwards {m} stops, and the next call wakes it with a short cold start. "
+     "Nothing is deleted. I haven't scaled it — ask me to if you want that."),
+    ("Would deleting {sp} affect jobs that are already running?",
+     "Running jobs keep their own copy of the steps, but new runs of {sp} would fail once it's deleted, and only a "
+     "re-deploy brings it back. I haven't deleted anything."),
+    ("can you tell me what cancelling a job does before I decide?",
+     "Cancelling stops a queued or running job; steps already done aren't rolled back and the job ends as cancelled. "
+     "Tell me the job id when you want me to cancel one."),
+    ("I'm thinking about registering an MCP, what do you need from me?",
+     "Its endpoint URL, the name to register it under, and the tools it exposes. If it isn't running yet, give me a "
+     "git repo instead and I can deploy it. I won't register anything until you confirm."),
+    ("Hur fungerar scale-to-zero här?",
+     "En MCP som skalas till noll stoppar sina poddar men raderas inte; nästa anrop väcker den igen med en kort "
+     "kallstart. Jag har inte ändrat något."),
+    ("before you do anything — what's a policy rule?",
+     "A policy rule decides who may call which MCP tool, on what data and when; every call is checked against them "
+     "and audited. I haven't changed or run anything."),
+    ("Just curious, how do background jobs report results?",
+     "A job gets an id when it starts; its status moves through queued, running and completed or failed, and the "
+     "result is stored with it. Ask me for a job's status or result whenever you like."),
+    ("No action needed, but what is a pipeline exactly?",
+     "A pipeline is a named chain of MCP tool calls with typed inputs and an output; running it executes the steps in "
+     "order through the router. I can list the ones you have if that helps."),
+    ("If I put {m} to sleep, what breaks?",
+     "Scaling {m} to zero stops its pods; nothing is deleted. The next call to one of its tools wakes it again, with a "
+     "cold start of a few seconds. I haven't changed anything — say \"scale {m} down\" if you want me to do it."),
+    ("Is it safe to scale {m} down to zero right now?",
+     "It's safe in the sense that nothing is lost: {m} just stops until the next call wakes it (a few seconds of cold "
+     "start). If something calls it constantly it will keep waking up. I haven't scaled anything."),
+    ("What's the safest way to give Sealfleet my API key?",
+     "Store it as a credential: it's encrypted at rest, scoped to the MCP that needs it, and injected at call time so "
+     "the model never sees the value. The portal's credential form keeps the secret out of the chat entirely."),
+    ("how are secrets stored on this platform?",
+     "Credentials are encrypted at rest and only decrypted inside the broker when a tool call needs them; listings "
+     "show names and metadata, never values, and the model never receives the secret itself."),
+    ("How does deploying an MCP from git work here?",
+     "Give me a repository URL and a name: the deploy service builds the image, runs it, and registers the MCP in "
+     "the router so its tools show up. Nothing is deployed until you ask me to."),
+    ("What's the difference between running a pipeline and starting a background job?",
+     "Running a pipeline waits and returns the result in this chat. A background job returns a job id immediately "
+     "and runs on its own; you can ask me for its status or result later."),
+    ("If I delete a pipeline, can I get it back?",
+     "Deleting removes a runtime-authored pipeline's definition; it can only come back if you re-deploy the "
+     "definition. Shipped example pipelines are protected and can't be deleted."),
+    ("explain what a policy check does, but don't run one",
+     "A policy check evaluates whether a specific MCP tool call would be allowed for you — identity, action and "
+     "data scope — without executing it. I haven't run one; give me the MCP and tool if you want me to."),
+]
+RESOLVE = [
+    ("job_cancel", "Run {p} as a background job", "Started job {j} ({p}, queued).",
+     ["cancel it", "actually, stop that job", "never mind, kill it"], lambda c: {"job_id": c["j"]}),
+    ("scale_down", "Is {m} scaled to zero?", "{m} is running with 1 replica.",
+     ["ok, scale it down then", "put it to sleep", "scale that one down"], lambda c: {"mcp": c["m"]}),
+    ("pipeline_delete", "Show the definition of the {sp} pipeline", "{sp}: a runtime-authored test pipeline with 2 steps.",
+     ["delete it", "remove that one", "ok get rid of it"], lambda c: {"name": c["sp"]}),
+]
+
+
+def gen_platform_guarded(catalog: dict) -> dict:
+    mcps = (catalog["mcps"] or REAL_MCPS_FALLBACK) + random.sample(SYNTH_MCPS, 1)
+    ctx = {"m": pick(mcps), "j": hexid(), "p": pick([t["name"] for t in catalog["pipeline_tools"]] or SYNTH_PIPELINES),
+           "sp": pick(SYNTH_PIPELINES)}
+    kind = random.choices(["clarify", "clarify_read", "explain", "resolve"], [0.3, 0.3, 0.25, 0.15])[0]
+    if kind in ("clarify", "clarify_read"):
+        tool = pick([k for k, v in VAGUE.items() if (v[1] is not None) == (kind == "clarify_read")])
+        qs, read_tool, ask = VAGUE[tool]
+        q = pick(qs)
+        messages = server._platform_messages(q)
+        if read_tool:
+            call = tool_call(read_tool, {"status": "running"} if read_tool == "job_list" else {})
+            if read_tool == "job_list":
+                ids = [hexid() for _ in range(random.randint(1, 3))]
+                result = _json({"jobs": [{"job_id": i, "status": "running", "pipeline": pick(SYNTH_PIPELINES)} for i in ids],
+                                "count": len(ids)})
+                opts = ", ".join(ids)
+            elif read_tool == "pipeline_list":
+                names = random.sample(SYNTH_PIPELINES, 3) + [t["name"] for t in catalog["pipeline_tools"]]
+                result = _json({"pipelines": [{"name": n, "version": 2} for n in names]})
+                opts = ", ".join(names)
+            else:
+                o = obs(catalog, "mcp_list")
+                result = o["result"] if o else _json([{"name": n} for n in mcps])
+                opts = ", ".join(mcps)
+            messages += [{"role": "assistant", "content": "", "tool_calls": [call]}, tool_result_msg(call, result)]
+            answer = ask.format(opts=opts)
+        else:
+            answer = ask
+        messages.append({"role": "assistant", "content": answer})
+    elif kind == "explain":
+        q_t, a_t = pick(EXPLAIN)
+        q = fill(q_t, ctx)
+        messages = server._platform_messages(q) + [{"role": "assistant", "content": fill(a_t, ctx)}]
+    else:
+        tool, u0, a0, follow, args = pick(RESOLVE)
+        history = [{"role": "user", "content": fill(u0, ctx)}, {"role": "assistant", "content": fill(a0, ctx)}]
+        q = pick(follow)
+        messages = server._platform_messages(q, history) + [
+            {"role": "assistant", "content": "", "tool_calls": [tool_call(tool, args(ctx))]}]
+    return {"messages": messages, "tools": catalog["_openai_tools"], "meta": {"task": "platform_guard", "kind": kind, "q": q}}
+
+
 def gen_platform(catalog: dict, trajectory: bool) -> dict:
     mcps = catalog["mcps"] or REAL_MCPS_FALLBACK
     pipeline_names = [t["name"] for t in catalog["pipeline_tools"]] + random.sample(SYNTH_PIPELINES, 2)
@@ -709,11 +847,15 @@ def norm_q(q: str) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--catalog", default=str(Path(__file__).with_name("catalog.json")))
-    ap.add_argument("--cases", default=str(Path(__file__).resolve().parents[1] / "eval" / "cases.yaml"))
+    ap.add_argument("--cases", nargs="+", default=[str(Path(__file__).resolve().parents[1] / "eval" / f)
+                                                   for f in ("cases.yaml", "cases_hard.yaml")],
+                    help="benchmark files whose questions are excluded from the data")
     ap.add_argument("--out", required=True)
     ap.add_argument("--n-select", type=int, default=3000)
     ap.add_argument("--n-platform", type=int, default=2500)
     ap.add_argument("--traj-frac", type=float, default=0.5, help="share of platform examples that are full trajectories")
+    ap.add_argument("--guard-frac", type=float, default=0.22,
+                    help="share of platform examples that ask/explain/resolve-from-history instead of acting")
     ap.add_argument("--val-frac", type=float, default=0.05)
     ap.add_argument("--system-prefix", default="/no_think",
                     help='prepended to the system turn (Nemotron reasoning off); "" to disable')
@@ -730,10 +872,12 @@ def main() -> None:
     secrets.token_hex = lambda n=16: "".join(random.choice("0123456789abcdef") for _ in range(2 * n))  # reproducible ids
     catalog = json.loads(Path(opts.catalog).read_text())
     catalog["_openai_tools"] = server._as_openai_tools(catalog["platform_tools"])
-    cases = yaml.safe_load(Path(opts.cases).read_text())
-    held_out = {norm_q(c["q"]) for level in cases.values() for c in level}
+    held_out = set()
+    for path in opts.cases:
+        for level in yaml.safe_load(Path(path).read_text()).values():
+            held_out |= {norm_q(c["q"]) for c in level or [] if isinstance(c, dict) and "q" in c}
 
-    rows, seen, leaked = [], set(), 0
+    rows, copies, leaked = [], {}, 0
     target = {"select": opts.n_select, "platform": opts.n_platform}
     made = {"select": 0, "platform": 0}
     attempts = 0
@@ -743,16 +887,23 @@ def main() -> None:
             break
         task = "select" if made["select"] < target["select"] and (
             made["platform"] >= target["platform"] or random.random() < 0.5) else "platform"
-        ex = gen_select(catalog["pipeline_tools"], catalog["mcps"]) if task == "select" else \
-            gen_platform(catalog, trajectory=random.random() < opts.traj_frac)
+        if task == "select":
+            ex = gen_select(catalog["pipeline_tools"], catalog["mcps"])
+        elif random.random() < opts.guard_frac:
+            ex = gen_platform_guarded(catalog)
+        else:
+            ex = gen_platform(catalog, trajectory=random.random() < opts.traj_frac)
         nq = norm_q(ex["meta"]["q"])
         if nq in held_out:
             leaked += 1
             continue
         key = json.dumps(ex["messages"], sort_keys=True)
-        if key in seen:
+        # Ask/explain rows have little natural variety; allow a few copies so the
+        # behaviour carries weight next to thousands of act-immediately rows.
+        cap = 4 if ex["meta"].get("kind") in ("explain", "clarify") else 1
+        if copies.get(key, 0) >= cap:
             continue
-        seen.add(key)
+        copies[key] = copies.get(key, 0) + 1
         if opts.system_prefix:
             if ex["messages"][0]["role"] == "system":
                 ex["messages"][0]["content"] = opts.system_prefix + "\n" + ex["messages"][0]["content"]
@@ -775,7 +926,10 @@ def main() -> None:
         for name, part in parts.items():
             expanded = []
             for r in part:
-                ends = [i for i, m in enumerate(r["messages"]) if m["role"] == "assistant"]
+                # Only turns generated for THIS request: assistant messages in the
+                # history are prompt context, not targets.
+                last_user = max(i for i, m in enumerate(r["messages"]) if m["role"] == "user")
+                ends = [i for i, m in enumerate(r["messages"]) if m["role"] == "assistant" and i > last_user]
                 for k, i in enumerate(ends):
                     expanded.append({**r, "messages": r["messages"][:i + 1],
                                      "meta": {**r["meta"], "turn": k, "turns": len(ends)}})

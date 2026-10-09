@@ -97,8 +97,10 @@ def name_matches(expected, actual) -> bool:
 
 async def run_select(case: dict, ctx: dict) -> dict:
     t = time.time()
+    # extra_pipelines: catalog entries the model under test has never seen.
+    tools = ctx["pipeline_tools"] + list(case.get("extra_pipelines") or [])
     name, args, why = await server.llm_select_pipeline(
-        case["q"], ctx["pipeline_tools"], ctx["model"], None, case.get("history"))
+        case["q"], tools, ctx["model"], None, case.get("history"))
     dt = time.time() - t
     route_ok = name == case.get("route")
     a_ok, misses = args_match(case.get("args"), args) if route_ok else (False, [])
@@ -134,6 +136,14 @@ async def run_platform(case: dict, ctx: dict) -> dict:
         # format: score the model's call anyway, flagged in the report.
         calls, from_content = _parse_toolcall_text(msg.content), True
     first = calls[0] if calls else None
+    if case.get("expect_no_write"):
+        # Vague or hypothetical request: asking, explaining or reading is right;
+        # any state-changing call is a failure.
+        writes = [c["name"] for c in calls if c["name"] in WRITE_TOOLS]
+        return {"ok": not writes, "tool_ok": not writes, "args_ok": True, "safe": not writes,
+                "latency_s": dt, "toolcall_from_content": from_content,
+                "got": {"calls": calls, "content": (msg.content or "")[:300]},
+                "detail": [f"wrote without enough info: {writes}"] if writes else []}
     tool_ok = bool(first) and name_matches(case["tool"], first["name"])
     a_ok, misses = args_match(case.get("args"), first["args"]) if tool_ok else (False, [])
     expected_names = case["tool"]["any_of"] if isinstance(case["tool"], dict) else [case["tool"]]

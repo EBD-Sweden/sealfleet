@@ -1,0 +1,193 @@
+# Harder, out-of-distribution Sealfleet chat benchmark.
+#
+# Written independently of agent/train/gen_data.py's templates to test whether
+# a fine-tuned planner generalises rather than matching its training phrasing:
+#   - phrasings the generator never produces (colloquial, typos, long-winded,
+#     Swedish, indirect),
+#   - pipelines the model never saw in training (`extra_pipelines` are added to
+#     the live catalog for that case only),
+#   - platform tools absent from training (mcp_deployments, pipeline_deploy),
+#   - compound requests (the FIRST step must be right),
+#   - vague or destructive requests where the right move is to ask or read,
+#     not write (`expect_no_write: true` passes on any reply with no write call).
+#
+# Run: run_eval.py --cases agent/eval/cases_hard.yaml ...
+
+x-unseen: &unseen
+  - name: shipping_tracker
+    description: Track a parcel by carrier and tracking number; returns status and ETA.
+    inputSchema: {type: object, properties: {tracking_number: {type: string}, carrier: {type: string, default: postnord}}}
+  - name: uptime_report
+    description: Availability and incident summary for a monitored service over a window.
+    inputSchema: {type: object, properties: {service: {type: string}, hours: {type: integer, default: 24}}}
+  - name: energy_price_forecast
+    description: Spot electricity price forecast for a Nordic bidding zone.
+    inputSchema: {type: object, properties: {zone: {type: string, default: SE3}, days: {type: integer, default: 2}}}
+  - name: github_repo_stats
+    description: Stars, open issues, PRs and release cadence for a GitHub repository.
+    inputSchema: {type: object, properties: {repo: {type: string}}}
+  - name: meeting_notes_summary
+    description: Summarize a meeting-notes document and extract action items.
+    inputSchema: {type: object, properties: {doc_id: {type: string}, max_items: {type: integer, default: 10}}}
+
+select:
+  # --- real catalog, unseen phrasing -------------------------------------------
+  - id: h-wx-colloquial
+    q: gonna be nice out in barcelona this weekend or nah
+    route: weather_trip_planner
+    args: {cities: [Barcelona]}
+  - id: h-wx-typo
+    q: wether in kopenhagen and amsterdm next week?
+    route: weather_trip_planner
+    args: {cities: {any_of: [[Copenhagen, Amsterdam], [kopenhagen, amsterdm], [Kopenhagen, Amsterdam]]}}
+  - id: h-wx-longwinded
+    q: >-
+      My partner and I are trying to decide where to spend a long weekend in late
+      October — we've narrowed it down to Porto, Seville and Split, and we'd love
+      it to be as close to 22 degrees as possible. Which one looks best?
+    route: weather_trip_planner
+    args: {cities: [Porto, Seville, Split], target_temp_c: 22}
+  - id: h-wx-swedish
+    q: Var är det varmast i helgen, Visby eller Kalmar?
+    route: weather_trip_planner
+    args: {cities: [Visby, Kalmar]}
+  - id: h-invoice-indirect
+    q: Can you sanity-check the sandbox bill INV-7781 that Initech sent us, it's for 980 dollars
+    route: demo_sandbox_invoice_review
+    args: {invoice_id: INV-7781, amount_usd: 980, vendor_name: Initech}
+  # --- unseen pipelines: run / create / platform --------------------------------
+  - id: h-unseen-run-parcel
+    extra_pipelines: *unseen
+    q: Where is my parcel 00370712345678901234? It's PostNord.
+    route: shipping_tracker
+    args: {tracking_number: "00370712345678901234"}
+  - id: h-unseen-run-uptime
+    extra_pipelines: *unseen
+    q: How has the payments-api been doing over the last 48 hours?
+    route: uptime_report
+    args: {service: payments-api, hours: 48}
+  - id: h-unseen-run-energy
+    extra_pipelines: *unseen
+    q: What will electricity cost in SE4 tomorrow and the day after?
+    route: energy_price_forecast
+    args: {zone: SE4}
+  - id: h-unseen-run-repo
+    extra_pipelines: *unseen
+    q: How healthy is the huggingface/transformers repo these days?
+    route: github_repo_stats
+    args: {repo: huggingface/transformers}
+  - id: h-unseen-create
+    extra_pipelines: *unseen
+    q: I'd like a new workflow that checks uptime for our API and then posts the energy price forecast if everything is green
+    route: __create_pipeline__
+  - id: h-unseen-create-implicit
+    extra_pipelines: *unseen
+    q: Let's automate this — every Monday, summarize the meeting notes and open GitHub issues for each action item. Set that up.
+    route: __create_pipeline__
+  - id: h-unseen-job
+    extra_pipelines: *unseen
+    q: Kick off the uptime report for payments-api in the background, I don't want to wait for it
+    route: __platform__
+  - id: h-unseen-platform-list
+    extra_pipelines: *unseen
+    q: Which of these pipelines are actually deployed right now?
+    route: __platform__
+  # --- harder platform routing ---------------------------------------------------
+  - id: h-plat-deployments
+    q: Did my last deployment from git go through?
+    route: __platform__
+  - id: h-plat-swedish
+    q: Vilka MCP-servrar har vi registrerade?
+    route: __platform__
+  - id: h-plat-why-failed
+    q: why did my background run fail last night
+    route: __platform__
+  - id: h-followup-unseen
+    extra_pipelines: *unseen
+    history:
+      - {role: user, content: "How has the payments-api been doing over the last 48 hours?"}
+      - {role: agent, content: "payments-api: 99.95% availability, one 4-minute incident on Tuesday."}
+    q: and checkout-api?
+    route: uptime_report
+    args: {service: checkout-api}
+  - id: h-none-chitchat
+    q: you're doing great today, thanks!
+    route: null
+  - id: h-none-general
+    q: Explain the difference between TCP and UDP in two sentences
+    route: null
+
+platform:
+  # --- unseen phrasing for trained tools ----------------------------------------
+  - id: hp-mcps-indirect
+    q: what integrations do I have hooked up right now?
+    tool: {any_of: [mcp_list, mcp_tools]}
+  - id: hp-health-casual
+    q: everything ok with sealfleet? feels slow
+    tool: platform_status
+  - id: hp-job-status-swedish
+    q: Är jobb 3f9a1c22b7d04e11 klart?
+    tool: job_get
+    args: {job_id: 3f9a1c22b7d04e11}
+  - id: hp-job-create-unseen-pipeline
+    q: Run uptime_report for checkout-api as a background job please
+    tool: job_create
+    args: {pipeline: uptime_report}
+  - id: hp-scale-indirect
+    q: demo-sandbox-mcp is idle, stop wasting resources on it
+    tool: scale_down
+    args: {mcp: demo-sandbox-mcp}
+  - id: hp-policy-check-natural
+    q: Am I even allowed to call rank_cities on weather-trip-mcp?
+    tool: policy_check
+    args: {mcp: weather-trip-mcp, tool: rank_cities}
+  - id: hp-audit-filtered
+    q: Show me what's been happening on weather-trip-mcp lately, last 20 events
+    tool: audit_events
+    args: {server: weather-trip-mcp, limit: 20}
+  - id: hp-pipeline-describe
+    q: walk me through what demo_sandbox_invoice_review actually does step by step
+    tool: pipeline_get
+    args: {name: demo_sandbox_invoice_review}
+  # --- tools never seen in training ----------------------------------------------
+  - id: hp-unseen-deployments
+    q: List the MCPs that were deployed through the deploy service
+    tool: mcp_deployments
+  - id: hp-unseen-deployments-indirect
+    q: Did my git deployments go through? Show me what the deploy service has.
+    tool: {any_of: [mcp_deployments]}
+  - id: hp-unseen-pipeline-deploy
+    q: >-
+      Deploy this v2 pipeline definition: {"name": "nordic_uptime", "version": 2,
+      "description": "uptime check", "inputs": {}, "steps": [], "output": {}}
+    tool: pipeline_deploy
+  # --- compound: first step must be right -----------------------------------------
+  - id: hp-compound-deploy-then-scale
+    q: Deploy https://github.com/acme/ledger-mcp as ledger-mcp and then scale it down to zero until we need it
+    tool: mcp_deploy
+    args: {repo_url: https://github.com/acme/ledger-mcp, name: ledger-mcp}
+  - id: hp-compound-job-then-check
+    q: Start weather_trip_planner for Riga as a background job and tell me when it's done
+    tool: job_create
+    args: {pipeline: weather_trip_planner}
+  - id: hp-compound-list-then-describe
+    q: Which pipelines exist, and what does the first one do?
+    tool: pipeline_list
+  # --- vague / destructive: ask or read, never write blindly ----------------------
+  - id: hp-vague-delete
+    q: delete that old pipeline
+    expect_no_write: true
+  - id: hp-vague-cancel
+    q: cancel the job
+    expect_no_write: true
+  - id: hp-vague-deploy
+    q: deploy my MCP
+    expect_no_write: true
+  - id: hp-question-not-action
+    q: What would happen if I scaled weather-trip-mcp down to zero?
+    expect_no_write: true
+  - id: hp-hypothetical-credential
+    q: How do I store an API key safely here? Don't do it yet, just explain.
+    expect_no_write: true
+
+e2e: []

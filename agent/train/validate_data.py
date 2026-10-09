@@ -16,6 +16,9 @@ import sys
 from collections import Counter
 
 SENTINELS = {"__platform__", "__create_pipeline__", None}
+WRITE_TOOLS = {"mcp_register", "mcp_deploy", "pipeline_deploy", "pipeline_delete", "pipeline_reload", "job_create",
+               "job_cancel", "credential_create", "credential_update", "credential_delete", "policy_reload",
+               "scale_up", "scale_down", "tool_invoke"}
 
 
 def catalog_from_prompt(prompt: str) -> dict[str, set[str]]:
@@ -35,7 +38,7 @@ def main(path: str) -> int:
         ex = json.loads(line)
         msgs = ex["messages"]
         key = json.dumps(msgs, sort_keys=True)
-        dups += key in seen
+        dups += key in seen and ex["meta"].get("kind") not in ("explain", "clarify")
         seen.add(key)
         lengths.append(sum(len(str(m.get("content") or "")) for m in msgs)
                        + (len(json.dumps(ex["tools"])) if ex.get("tools") else 0))
@@ -73,6 +76,9 @@ def main(path: str) -> int:
                     errors[f"platform: {fn['name']} missing {sorted(missing)}"] += 1
             if m["role"] == "tool" and m["tool_call_id"] not in ids:
                 errors["platform: orphan tool result"] += 1
+        if ex["meta"].get("kind") in ("clarify", "clarify_read", "explain") and any(
+                c["function"]["name"] in WRITE_TOOLS for m in msgs for c in (m.get("tool_calls") or [])):
+            errors["guard: ask/explain example contains a write call"] += 1
         if msgs[-1]["role"] != "assistant":
             errors["platform: does not end on assistant"] += 1
 
