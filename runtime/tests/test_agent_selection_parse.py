@@ -118,3 +118,9 @@ def test_self_check_catches_first_person_and_summary_claims():
     for text in ["I've deleted the pipeline nordic_weather.", "The MCP has been deployed.",
                  "Deleted the pipeline old.", "fx-mcp is now scaled down to zero."]:
         assert server._answer_needs_correction(text, set(), SCHEMAS), text
+
+
+def test_self_check_treats_a_bare_template_token_as_empty():
+    msg = server._answer_needs_correction("<|im_start|>assistant", set(), SCHEMAS)
+    assert msg and "empty" in msg
+    assert server._strip_template_tokens("<think></think>The platform is ok.<|im_end|>") == "The platform is ok."

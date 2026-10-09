@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Collection
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -552,15 +553,26 @@ _ACTION_CLAIM = re.compile(
     re.IGNORECASE)
 
 
-def _answer_needs_correction(answer: str, succeeded_writes, schemas: dict) -> str | None:
+# Chat-template control tokens a model occasionally emits as text.
+_TEMPLATE_TOKENS = re.compile(r"<\|im_(?:start|end)\|>(?:assistant|user|system)?|<\|endoftext\|>|</?think>")
+
+
+def _strip_template_tokens(answer: str) -> str:
+    return _TEMPLATE_TOKENS.sub("", answer or "").strip()
+
+
+def _answer_needs_correction(answer: str, writes: Collection[str], schemas: dict) -> str | None:
     """Correction message for a final answer that must not reach the user, or None."""
+    if not _strip_template_tokens(answer):
+        return ("Your last reply was empty. Answer the user's question in plain text, using the tool "
+                "results above if there are any.")
     if _TOOL_MARKUP.search(answer):
         names = [a or b for a, b in _TOOL_MARKUP_NAME.findall(answer)]
         unknown = [n for n in names if n not in schemas]
         what = f"'{unknown[0]}' is not one of your tools" if unknown else "that tool call was not valid"
         return (f"Your last reply contained tool-call markup instead of a tool call: {what}. "
                 f"Available tools: {', '.join(sorted(schemas))}. Call the right tool, or answer in plain text.")
-    if not succeeded_writes and _ACTION_CLAIM.search(answer):
+    if not writes and _ACTION_CLAIM.search(answer):
         return ("You said you changed something, but you have not called any tool in this turn, so nothing "
                 "happened. If the user asked for that action, call the tool now. Otherwise answer without "
                 "claiming to have done it.")
@@ -662,6 +674,7 @@ async def run_platform_loop(
             # write ran this turn. Either way the user would get a false or
             # unusable answer, so give the model one correction and continue.
             correction = None if corrected else _answer_needs_correction(answer, write_results, schemas)
+            answer = _strip_template_tokens(answer)
             if correction:
                 corrected = True
                 messages.append({"role": "assistant", "content": answer})
