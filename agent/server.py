@@ -530,6 +530,26 @@ def _as_openai_tools(mcp_tools: list[dict]) -> list[dict]:
     } for t in mcp_tools]
 
 
+def _repair_tool_args(args: dict, schema: dict | None) -> dict:
+    """Fix the one argument-name slip models make against MCP tool schemas.
+
+    Several control tools take the MCP as `mcp` while others take it as `name`;
+    models carry one over, e.g. mcp_get {"mcp": "x"} where the schema requires
+    {"name": "x"}. When exactly one required key is missing and exactly one key
+    is not in the schema, the unknown key is that argument under the wrong name.
+    Anything less clear-cut is passed through for the tool to reject.
+    """
+    if not isinstance(args, dict) or not schema:
+        return args
+    props = schema.get("properties") or {}
+    unknown = [k for k in args if k not in props]
+    missing = [k for k in schema.get("required") or [] if k not in args]
+    if len(unknown) == 1 and len(missing) == 1:
+        args = dict(args)
+        args[missing[0]] = args.pop(unknown[0])
+    return args
+
+
 def _platform_messages(question: str, history: list[dict] | None = None) -> list[dict]:
     """Opening messages of the platform loop (shared with agent/eval and training data)."""
     return [
@@ -570,6 +590,7 @@ async def run_platform_loop(
     tools = _as_openai_tools(mcp_tools)
     read_only = {t["name"] for t in mcp_tools
                  if (t.get("annotations") or {}).get("readOnlyHint")}
+    schemas = {t["function"]["name"]: t["function"]["parameters"] for t in tools}
 
     selected = model or OPENAI_MODEL
     generous = needs_generous_budget(selected)
@@ -613,6 +634,7 @@ async def run_platform_loop(
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
+            args = _repair_tool_args(args, schemas.get(tc.function.name))
             key = _key(tc.function.name, args)
             is_write = tc.function.name not in read_only
             if is_write and key in write_results:

@@ -62,3 +62,21 @@ def test_system_prefix_prepends_to_existing_system_turn():
 def test_system_prefix_inserts_system_turn_when_missing():
     out = server._with_system_prefix([{"role": "user", "content": "hi"}], "/no_think")
     assert out == [{"role": "system", "content": "/no_think"}, {"role": "user", "content": "hi"}]
+
+
+SCHEMA_MCP_GET = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+SCHEMA_DEPLOY = {"type": "object", "properties": {"repo_url": {"type": "string"}, "name": {"type": "string"}},
+                 "required": ["repo_url", "name"]}
+
+
+def test_repair_renames_single_misnamed_required_arg():
+    assert server._repair_tool_args({"mcp": "weather-trip-mcp"}, SCHEMA_MCP_GET) == {"name": "weather-trip-mcp"}
+    assert server._repair_tool_args({"mcp": "fx-mcp", "repo_url": "https://x"}, SCHEMA_DEPLOY) == {
+        "name": "fx-mcp", "repo_url": "https://x"}
+
+
+def test_repair_leaves_ambiguous_or_valid_args_alone():
+    assert server._repair_tool_args({"name": "a"}, SCHEMA_MCP_GET) == {"name": "a"}
+    assert server._repair_tool_args({"x": 1, "y": 2}, SCHEMA_MCP_GET) == {"x": 1, "y": 2}
+    assert server._repair_tool_args({}, SCHEMA_DEPLOY) == {}
+    assert server._repair_tool_args({"mcp": "a"}, None) == {"mcp": "a"}

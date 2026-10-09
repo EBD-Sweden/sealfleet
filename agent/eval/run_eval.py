@@ -17,6 +17,7 @@ Options: --levels select,platform,e2e  --repeat N  --concurrency N  --only <id-p
          --base-url URL   call this OpenAI-compatible engine directly instead of
                           llm-proxy (select/platform only), e.g. a model under test
          --no-think       prepend "/no_think" (Nemotron-Nano-v2 reasoning toggle)
+         --repair-args    score platform calls after agent._repair_tool_args (what production executes)
          --extra-body J   JSON merged into every request, e.g. '{"enable_thinking": false}'
                           (Nemotron-3 / Qwen3 template flag)
 """
@@ -135,6 +136,11 @@ async def run_platform(case: dict, ctx: dict) -> dict:
         # Engine without a parser for Nemotron's <TOOLCALL>[...]</TOOLCALL>
         # format: score the model's call anyway, flagged in the report.
         calls, from_content = _parse_toolcall_text(msg.content), True
+    if ctx.get("repair_args"):
+        # Score what the agent would execute: agent._repair_tool_args fixes a
+        # single misnamed required argument against the tool schema.
+        schemas = {t["function"]["name"]: t["function"]["parameters"] for t in ctx["platform_tools"]}
+        calls = [{**c, "args": server._repair_tool_args(c["args"], schemas.get(c["name"]))} for c in calls]
     first = calls[0] if calls else None
     if case.get("expect_no_write"):
         # Vague or hypothetical request: asking, explaining or reading is right;
@@ -227,6 +233,8 @@ async def main() -> int:
     ap.add_argument("--base-url", default="")
     ap.add_argument("--no-think", action="store_true")
     ap.add_argument("--extra-body", default="")
+    ap.add_argument("--repair-args", action="store_true",
+                    help="apply the agent's argument-name repair before scoring platform calls")
     opts = ap.parse_args()
 
     if opts.base_url:
@@ -254,6 +262,7 @@ async def main() -> int:
     await mcp.initialize()
     ctx = {
         "model": opts.model,
+        "repair_args": opts.repair_args,
         "pipeline_tools": await server.fetch_pipeline_tools(identity),
         "platform_tools": server._as_openai_tools(await mcp.list_tools()),
     }
@@ -281,7 +290,7 @@ async def main() -> int:
     wall = time.time() - wall
 
     summary = {"model": opts.model, "base_url": opts.base_url or "llm-proxy",
-               "no_think": opts.no_think, "extra_body": opts.extra_body or None, "wall_s": round(wall, 1), "concurrency": opts.concurrency, "levels": {}}
+               "no_think": opts.no_think, "repair_args": opts.repair_args, "extra_body": opts.extra_body or None, "wall_s": round(wall, 1), "concurrency": opts.concurrency, "levels": {}}
     for level in LEVELS:
         rs = [r for r in results if r["level"] == level]
         if not rs:

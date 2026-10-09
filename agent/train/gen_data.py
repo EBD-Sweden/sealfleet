@@ -654,7 +654,11 @@ def platform_case(catalog: dict, pipeline_names: list[str], mcps: list[str]) -> 
         t = random.choices(["policy_rules", "policy_check", "policy_reload"], [0.5, 0.35, 0.15])[0]
         return say(t), [(t, {"mcp": m, "tool": ctx["tool"]} if t == "policy_check" else {})], None
     if kind == "audit":
-        t = random.choice(["audit", "audit_any", "audit_server"])
+        t = random.choice(["audit", "audit_any", "audit_server", "audit_both"])
+        if t == "audit_both":
+            q = pick(["Last {k} audit events for {m}", "show {k} recent events on {m}",
+                      "What did {m} do lately? Give me {k} audit entries", "{m}: last {k} audit log lines"])
+            return fill(q, ctx), [("audit_events", {"server": m, "limit": ctx["k"]})], None
         a = {"audit": {"limit": ctx["k"]}, "audit_any": {}, "audit_server": {"server": m}}[t]
         return say(t), [("audit_events", a)], None
     if kind == "health":
@@ -755,7 +759,42 @@ EXPLAIN = [
      "A policy check evaluates whether a specific MCP tool call would be allowed for you — identity, action and "
      "data scope — without executing it. I haven't run one; give me the MCP and tool if you want me to."),
 ]
+# Hypothetical / "don't do it yet" questions about every write action. Built
+# from patterns x actions so the model learns the intent, not a few sentences.
+# Action phrasings deliberately differ from agent/eval/cases_hard.yaml.
+EXPLAIN_PATTERNS = [
+    "What would happen if I {a}?", "What happens if I {a}?", "If I {a}, what changes?",
+    "How do I {a}? Don't do it yet, just explain.", "How would I {a}? No need to do it now.",
+    "Explain what it means to {a} — don't actually do it.", "Hypothetically, if we {a}, would anything break?",
+    "Don't {a} yet — first tell me what it involves.", "Is it a good idea to {a}? Just advise, no changes.",
+    "Walk me through how to {a}, I'll do it myself later.", "Can you explain the steps to {a} without doing them?",
+    "Before you touch anything: what's involved if I {a}?",
+]
+EXPLAIN_ACTIONS = [
+    ("put {m} to sleep", "say \"scale {m} down\"",
+     "Scaling {m} to zero stops its pods; nothing is deleted, and the next call wakes it with a short cold start."),
+    ("take {m} down to zero replicas", "say \"scale {m} down\"",
+     "{m} would stop running until something calls it; then the router starts it again after a short cold start."),
+    ("save my {e} key as a credential", "give me a name and the value (or use the portal's credential form)",
+     "Credentials are encrypted at rest, scoped to the MCP that uses them, and injected at call time so the model "
+     "never sees the value. The portal's credential form keeps the secret out of the chat entirely."),
+    ("give the {e} MCP my token", "tell me the credential name and value, or use the portal form",
+     "You'd store the token as a credential assigned to that MCP; it's encrypted at rest and only decrypted when "
+     "the MCP is called, never shown back."),
+    ("remove the {sp} pipeline", "say \"delete {sp}\"",
+     "Deleting removes a runtime-authored pipeline's definition; new runs fail until it's re-deployed. Shipped "
+     "example pipelines are protected."),
+    ("stop job {j}", "say \"cancel job {j}\"",
+     "Cancelling ends a queued or running job; finished steps aren't rolled back and the job is marked cancelled."),
+    ("ship {r} as an MCP", "say \"deploy {r}\" with the name to use",
+     "The deploy service would build the repository into an image, run it and register it so its tools appear."),
+    ("reload every policy rule", "say \"reload the policies\"",
+     "Reloading re-reads the policy files; new rules apply to the next calls. It needs the policy.admin permission."),
+    ("wake {m} back up", "say \"scale {m} up\"",
+     "Scaling {m} up starts its pods now instead of waiting for the next call, so the first request is fast."),
+]
 RESOLVE = [
+
     ("job_cancel", "Run {p} as a background job", "Started job {j} ({p}, queued).",
      ["cancel it", "actually, stop that job", "never mind, kill it"], lambda c: {"job_id": c["j"]}),
     ("scale_down", "Is {m} scaled to zero?", "{m} is running with 1 replica.",
@@ -769,7 +808,16 @@ def gen_platform_guarded(catalog: dict) -> dict:
     mcps = (catalog["mcps"] or REAL_MCPS_FALLBACK) + random.sample(SYNTH_MCPS, 1)
     ctx = {"m": pick(mcps), "j": hexid(), "p": pick([t["name"] for t in catalog["pipeline_tools"]] or SYNTH_PIPELINES),
            "sp": pick(SYNTH_PIPELINES)}
-    kind = random.choices(["clarify", "clarify_read", "explain", "resolve"], [0.3, 0.3, 0.25, 0.15])[0]
+    kind = random.choices(["clarify", "clarify_read", "explain", "explain_action", "resolve"],
+                          [0.22, 0.22, 0.12, 0.32, 0.12])[0]
+    if kind == "explain_action":
+        ctx.update(e=pick(["binance", "kraken", "openai", "slack", "github"]), r=pick(REPOS).format(n=pick(SYNTH_MCPS)))
+        action, how, why = pick(EXPLAIN_ACTIONS)
+        q = fill(pick(EXPLAIN_PATTERNS), {"a": fill(action, ctx)})
+        answer = fill(why, ctx) + " I haven't done anything — " + fill(how, ctx) + " if you want me to."
+        messages = server._platform_messages(q) + [{"role": "assistant", "content": answer}]
+        return {"messages": messages, "tools": catalog["_openai_tools"],
+                "meta": {"task": "platform_guard", "kind": "explain", "q": q}}
     if kind in ("clarify", "clarify_read"):
         tool = pick([k for k, v in VAGUE.items() if (v[1] is not None) == (kind == "clarify_read")])
         qs, read_tool, ask = VAGUE[tool]

@@ -53,6 +53,7 @@ docker run --rm --name "sealfleet-lora-$RUN" \
   --gpus all --ipc=host --ulimit memlock=-1 \
   --memory="$MEM_CAP" --memory-swap="$MEM_CAP" \
   -e HF_HUB_OFFLINE=1 -e HF_HOME=/tmp/hf \
+  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   -v "$MODEL_DIR":/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16:ro \
   -v "$DATA_DIR":/data:ro \
   -v "$HERE/${CONFIG:-lora_nemotron3_30b.yaml}":/cfg/lora.yaml:ro \
