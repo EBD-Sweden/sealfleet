@@ -19,7 +19,7 @@ job", job follow-ups ("is it done?"), create-vs-run, and argument fidelity.
 Benchmark questions (agent/eval/cases.yaml) are excluded.
 
     python agent/train/gen_data.py --catalog agent/train/catalog.json \
-        --out /srv/spark-share/datasets/sealfleet-tools --n-select 3000 --n-platform 2500
+        --out /srv/datasets/sealfleet-tools --n-select 3000 --n-platform 2500
 
 Output: train.jsonl / val.jsonl, one {"messages", "tools", "meta"} per line
 (OpenAI chat format; assistant tool calls as `tool_calls`).
@@ -70,7 +70,7 @@ SYNTH_MCPS = ["fx-mcp", "binance-mcp", "kraken-mcp", "sec-search-mcp", "news-mcp
 SYNTH_PIPELINES = ["crypto_price_lookup", "fx_convert", "portfolio_summary", "news_digest",
                    "sec_filing_search", "vendor_risk_score", "arbitrage_scan", "nordic_weather",
                    "daily_market_brief", "invoice_batch_check"]
-REPOS = ["https://github.com/acme/{n}", "https://github.com/ebd-labs/{n}", "https://gitlab.com/tools/{n}",
+REPOS = ["https://github.com/acme/{n}", "https://github.com/example-labs/{n}", "https://gitlab.com/tools/{n}",
          "https://github.com/example-org/{n}"]
 
 

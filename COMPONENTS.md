@@ -146,7 +146,7 @@
 speaks MCP to the router's own `/mcp` — the same surface external clients use
 — with the logged-in user's identity on every call. Standard OpenAI
 tool-calling; capped at `PLATFORM_MAX_STEPS` (8). Native tool-calling is
-required of the model: the NIM and spark-infer (mistral.rs, from the spark9 build) support it; the Anthropic path in llm-proxy
+required of the model: NVIDIA NIM, vLLM, SGLang and mistral.rs support it; the Anthropic path in llm-proxy
 does not yet translate `tools`.
 
 **Selection robustness for small local models:** `_parse_selection` keeps the

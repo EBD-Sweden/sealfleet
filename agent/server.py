@@ -67,10 +67,12 @@ llm = AsyncOpenAI(
 #   LOCAL_LLM_EXTRA_BODY     JSON merged into the request body, e.g.
 #                            '{"chat_template_kwargs": {"enable_thinking": false}}'
 #                            for Nemotron-3 / Qwen3 templates (the Sealfleet LoRA
-#                            is trained so). Use chat_template_kwargs: spark-router
-#                            drops a top-level enable_thinking.
+#                            is trained so). Use chat_template_kwargs: some routers
+#                            (e.g. SGLang's) drop a top-level enable_thinking.
 LOCAL_LLM_SYSTEM_PREFIX = os.getenv("LOCAL_LLM_SYSTEM_PREFIX", "")
 LOCAL_LLM_EXTRA_BODY = json.loads(os.getenv("LOCAL_LLM_EXTRA_BODY", "") or "{}")
+if not isinstance(LOCAL_LLM_EXTRA_BODY, dict):
+    raise SystemExit("LOCAL_LLM_EXTRA_BODY must be a JSON object")
 
 
 def _with_system_prefix(messages: list[dict], prefix: str) -> list[dict]:

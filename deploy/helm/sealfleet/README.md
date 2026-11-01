@@ -84,9 +84,9 @@ Prod-leaning defaults already set: `router.requireAuth=true`,
 ## Local k3s (single box, on-cluster inference)
 
 `values-k3s-local.yaml` installs the full stack — including the chat — on a
-local k3s next to an OpenAI-compatible model server (e.g. spark-infer at
-`spark-router.spark-infer.svc:30000`). Images are imported into containerd
-(`imagePullPolicy: Never`, pinned via `nodeSelector`); the build/import commands
+local k3s next to an OpenAI-compatible model server (e.g. vLLM, SGLang or
+mistral.rs as an in-cluster Service). Images are imported into containerd
+(`imagePullPolicy: Never`; on a multi-node cluster pin them with `nodeSelector`); the build/import commands
 are at the top of that file. The migrate Job takes its SQL from the
 `sealfleet-migrate-sql` image (`db/Dockerfile`) and seeds the operator key.
 

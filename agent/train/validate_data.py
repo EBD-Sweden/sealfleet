@@ -5,7 +5,7 @@ name a tool in that example's catalog (or a sentinel / null) and only use its
 input keys; platform tool calls name an offered tool, parse as JSON, and carry
 every required argument. Also reports duplicates and length percentiles.
 
-    python agent/train/validate_data.py /srv/spark-share/datasets/sealfleet-tools-v1/train.jsonl
+    python agent/train/validate_data.py /srv/datasets/sealfleet-tools-v1/train.jsonl
 """
 
 from __future__ import annotations

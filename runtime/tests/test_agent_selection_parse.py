@@ -1,6 +1,6 @@
 """Pipeline selection survives a malformed arguments object.
 
-Small local models (Qwen2.5-7B on spark-infer) echo the prompt's
+Small local models (e.g. Qwen2.5-7B) echo the prompt's
 {"<param>": ...} placeholder and return {"tool": "platform", "arguments": {"}}.
 The tool choice is right; dropping it to the keyword fallback lost the turn.
 """

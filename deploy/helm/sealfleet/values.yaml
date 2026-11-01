@@ -263,7 +263,7 @@ llmProxy:
   # -- On-cluster/on-box OpenAI-compatible model server. Requests for
   #    "local/..." models are pinned here and never egress.
   local:
-    baseUrl: ""        # e.g. http://spark-router.spark-infer.svc.cluster.local:30000/v1
+    baseUrl: ""        # e.g. http://vllm.inference.svc.cluster.local:8000/v1
     model: ""
     timeoutMs: "300000"
   # -- Name of a Secret holding optional cloud fallbacks (ANTHROPIC_API_KEY,

@@ -14,9 +14,9 @@ set -euo pipefail
 RUN=${1:?usage: run_lora.sh <run-name> [overrides...]}
 shift
 IMAGE=${IMAGE:-nvcr.io/nvidia/nemo-automodel:26.06}
-MODEL_DIR=${MODEL_DIR:-/srv/spark-share/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
-DATA_DIR=${DATA_DIR:-/srv/spark-share/datasets/sealfleet-tools-v1-nemotron3}
-OUT_ROOT=${OUT_ROOT:-/srv/spark-share/runs/sealfleet-lora}
+MODEL_DIR=${MODEL_DIR:-/srv/models/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
+DATA_DIR=${DATA_DIR:-/srv/datasets/sealfleet-tools-v1-nemotron3}
+OUT_ROOT=${OUT_ROOT:-/srv/runs/sealfleet-lora}
 MEM_CAP=${MEM_CAP:-80g}
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT="$OUT_ROOT/$RUN"

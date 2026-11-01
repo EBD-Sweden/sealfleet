@@ -26,9 +26,10 @@ image:
   tag: k3s-local
   pullPolicy: Never
 
-# Locally-imported images exist only on this node.
-nodeSelector:
-  kubernetes.io/hostname: ebd-nano
+# Locally-imported images exist only on the node they were imported on. On a
+# single-node k3s nothing is needed; on more nodes pin the pods there, e.g.
+#   --set nodeSelector."kubernetes\.io/hostname"=<node-name>
+nodeSelector: {}
 
 secrets:
   create: false
@@ -53,7 +54,9 @@ router:
     ENDPOINT_OVERRIDES: '{"demo-sandbox-mcp":"http://demo-sandbox-mcp:8080"}'
 portal:
   replicas: 1
-  publicUrl: "http://192.168.50.64:30004"   # this node's LAN IP
+  # The URL browsers use (NEXTAUTH_URL). Set it to this node's address:
+  #   --set portal.publicUrl=http://<node-ip>:30004
+  publicUrl: "http://localhost:30004"
   service:
     type: NodePort
     nodePort: 30004
@@ -62,15 +65,16 @@ coreAgent:
   # Default to the on-cluster model; no cloud key is configured.
   model: "local/default"
   extraEnv:
-    # spark-infer serves the Sealfleet LoRA of Nemotron-3-Nano-30B, trained with
-    # reasoning off; its chat template switches that with enable_thinking. Pass
-    # it as chat_template_kwargs: spark-router (sglang smg) drops a top-level
+    # The local server serves the Sealfleet LoRA of Nemotron-3-Nano-30B, trained
+    # with reasoning off; its chat template switches that with enable_thinking.
+    # Pass it as chat_template_kwargs: some routers (e.g. SGLang's) drop a top-level
     # enable_thinking field but forwards chat_template_kwargs to the worker.
     LOCAL_LLM_EXTRA_BODY: '{"chat_template_kwargs": {"enable_thinking": false}}'
 llmProxy:
   local:
-    # spark-infer (mistral.rs) OpenAI endpoint, model id "default".
-    baseUrl: "http://spark-router.spark-infer.svc.cluster.local:30000/v1"
+    # In-cluster OpenAI-compatible endpoint (vLLM, SGLang, mistral.rs, ...).
+    # Point it at your model server's Service; model id "default".
+    baseUrl: "http://llm.inference.svc.cluster.local:8000/v1"
     model: "default"
 
 exampleMcps:
