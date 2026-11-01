@@ -7,7 +7,10 @@ Deploys the full Sealfleet control plane to Kubernetes:
 | registry  | 8010 | Deployment + ClusterIP Service | discovery |
 | deploy    | 8030 | Deployment + ClusterIP Service | git→k8s MCP deploy service (single-writer) |
 | router    | 8040 | Deployment + ClusterIP Service | runtime router; scale-to-zero RBAC |
-| portal    | 3004 | Deployment + ClusterIP Service | web UI |
+| portal    | 3004 | Deployment + ClusterIP/NodePort Service | web UI |
+| core-agent | 8050 | Deployment + ClusterIP Service | chat agent (pipelines + platform actions) |
+| llm-proxy | 3456 | Deployment + ClusterIP Service | OpenAI-compatible LLM entry; `local/…` pinned to `llmProxy.local.baseUrl` |
+| example MCPs | 8080 | Deployment + Service each (opt-in `exampleMcps.enabled`) | weather-trip, demo-sandbox |
 
 Plus:
 
@@ -26,7 +29,8 @@ Plus:
 - Helm 3.x
 - An ingress controller (Traefik / nginx / ALB / GCE) if `ingress.enabled=true`
 - (Prod) cert-manager for automated TLS, and a managed Postgres (RDS / Cloud SQL)
-- Container images for the four services pushed to a reachable registry
+- Container images for the services pushed to a reachable registry (or imported
+  into the node's containerd — see "Local k3s" below)
 
 ## Quick start (evaluation, in-cluster Postgres)
 
@@ -76,6 +80,34 @@ helm upgrade --install mcpfinder deploy/helm/sealfleet \
 
 Prod-leaning defaults already set: `router.requireAuth=true`,
 `router.allowEphemeralKeys=false`, `ingress.tls.enabled=true`.
+
+## Local k3s (single box, on-cluster inference)
+
+`values-k3s-local.yaml` installs the full stack — including the chat — on a
+local k3s next to an OpenAI-compatible model server (e.g. vLLM, SGLang or
+mistral.rs as an in-cluster Service). Images are imported into containerd
+(`imagePullPolicy: Never`; on a multi-node cluster pin them with `nodeSelector`); the build/import commands
+are at the top of that file. The migrate Job takes its SQL from the
+`sealfleet-migrate-sql` image (`db/Dockerfile`) and seeds the operator key.
+
+Create the Secret first (reusing the compose keys volume keeps sessions and
+encrypted data compatible):
+
+```bash
+K=$(mktemp -d); docker run --rm -v mcpfinder_sealfleet_keys:/k:ro -v $K:/o alpine sh -c 'cp /k/* /o/ && chmod 644 /o/*'
+PW=$(openssl rand -hex 16)
+kubectl create ns sealfleet
+kubectl -n sealfleet create secret generic sealfleet-platform-secrets \
+  --from-literal=DATABASE_URL="postgresql://mcpfinder:$PW@sealfleet-postgresql:5432/mcpfinder?sslmode=disable" \
+  --from-file=ENCRYPTION_KEY=$K/encryption-key --from-file=ROUTER_RS256_PRIVATE_KEY=$K/router-rs256.pem \
+  --from-file=NEXTAUTH_SECRET=$K/nextauth-secret --from-file=RUNTIME_API_KEY=$K/runtime-api-key \
+  --from-file=NEXTAUTH_RS256_PRIVATE_KEY=$K/portal-rs256.pem
+rm -rf $K
+helm upgrade --install sealfleet deploy/helm/sealfleet -n sealfleet \
+  -f deploy/helm/sealfleet/values-k3s-local.yaml --set postgresql.auth.password="$PW"
+```
+
+The portal is then on `http://<node-ip>:30004`.
 
 ## Key values
 

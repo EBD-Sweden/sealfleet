@@ -26,6 +26,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "mcpfinder.scheduling" . | nindent 6 }}
       securityContext:
         {{- toYaml (.Values.portal.podSecurityContext | default .Values.podSecurityContext) | nindent 8 }}
       containers:
@@ -59,15 +60,20 @@ spec:
               value: "http://{{ $router }}:{{ .Values.router.port }}"
             - name: DEPLOY_URL
               value: "http://{{ $deploy }}:{{ .Values.deploy.port }}"
-            {{- if .Values.agent.enabled }}
+            {{- if .Values.coreAgent.enabled }}
             - name: AGENT_URL
-              value: "http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "agent") }}:{{ .Values.agent.port }}"
+              value: "http://{{ include "mcpfinder.componentName" (dict "ctx" . "component" "core-agent") }}:{{ .Values.coreAgent.port }}"
             {{- end }}
             - name: RUNTIME_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "mcpfinder.secretName" . }}
                   key: RUNTIME_API_KEY
+            - name: NEXTAUTH_RS256_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: NEXTAUTH_RS256_PRIVATE_KEY
             - name: NEXTAUTH_URL
               value: {{ include "mcpfinder.portalUrl" . | quote }}
             - name: AUTH_URL
@@ -92,11 +98,14 @@ metadata:
     app.kubernetes.io/component: portal
     app: {{ $name }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.portal.service.type }}
   selector:
     {{- include "mcpfinder.selectorLabels" (dict "ctx" . "component" "portal") | nindent 4 }}
   ports:
     - port: {{ .Values.portal.port }}
       targetPort: {{ .Values.portal.port }}
       name: http
+      {{- if and (eq .Values.portal.service.type "NodePort") .Values.portal.service.nodePort }}
+      nodePort: {{ .Values.portal.service.nodePort }}
+      {{- end }}
 {{- end }}

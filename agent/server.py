@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Collection
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -59,6 +60,40 @@ llm = AsyncOpenAI(
     api_key=OPENAI_API_KEY,
     timeout=httpx.Timeout(max(LLM_TIMEOUT, LOCAL_LLM_TIMEOUT), connect=3.0),
 )
+
+# Request shaping for "local/" models only (cloud and byo models never get it):
+#   LOCAL_LLM_SYSTEM_PREFIX  prepended to the system turn, e.g. "/no_think" for
+#                            Nemotron-Nano-v2 (agent/train data uses it).
+#   LOCAL_LLM_EXTRA_BODY     JSON merged into the request body, e.g.
+#                            '{"chat_template_kwargs": {"enable_thinking": false}}'
+#                            for Nemotron-3 / Qwen3 templates (the Sealfleet LoRA
+#                            is trained so). Use chat_template_kwargs: some routers
+#                            (e.g. SGLang's) drop a top-level enable_thinking.
+LOCAL_LLM_SYSTEM_PREFIX = os.getenv("LOCAL_LLM_SYSTEM_PREFIX", "")
+LOCAL_LLM_EXTRA_BODY = json.loads(os.getenv("LOCAL_LLM_EXTRA_BODY", "") or "{}")
+if not isinstance(LOCAL_LLM_EXTRA_BODY, dict):
+    raise SystemExit("LOCAL_LLM_EXTRA_BODY must be a JSON object")
+
+
+def _with_system_prefix(messages: list[dict], prefix: str) -> list[dict]:
+    if messages and messages[0].get("role") == "system":
+        return [{**messages[0], "content": prefix + "\n" + str(messages[0].get("content") or "")}, *messages[1:]]
+    return [{"role": "system", "content": prefix}, *messages]
+
+
+if LOCAL_LLM_SYSTEM_PREFIX or LOCAL_LLM_EXTRA_BODY:
+    _create = llm.chat.completions.create
+
+    async def _create_for_local(**kw):
+        if str(kw.get("model") or OPENAI_MODEL).startswith("local/"):
+            if LOCAL_LLM_SYSTEM_PREFIX:
+                kw["messages"] = _with_system_prefix(kw["messages"], LOCAL_LLM_SYSTEM_PREFIX)
+            if LOCAL_LLM_EXTRA_BODY:
+                kw["extra_body"] = {**(kw.get("extra_body") or {}), **LOCAL_LLM_EXTRA_BODY}
+        return await _create(**kw)
+
+    llm.chat.completions.create = _create_for_local
+
 http = httpx.AsyncClient(
     timeout=20.0,
     headers={"X-API-Key": ROUTER_API_KEY} if ROUTER_API_KEY else {},
@@ -507,26 +542,68 @@ def _as_openai_tools(mcp_tools: list[dict]) -> list[dict]:
     } for t in mcp_tools]
 
 
-async def run_platform_loop(
-    question: str, identity: dict, model: str | None, llm_headers: dict | None,
-    history: list[dict] | None = None,
-) -> tuple[str, list[str], list[dict]]:
-    """Let the model operate the platform through the MCP control server.
+_TOOL_MARKUP = re.compile(r"<tool_call>|<function=|<TOOLCALL>")
+_TOOL_MARKUP_NAME = re.compile(r"<function=([\w.-]+)>|\"name\"\s*:\s*\"([\w.-]+)\"")
+# Claims of having changed state: "I've started…", "has been deleted", "is now
+# scaled", or a summary-style sentence opening with the verb ("Started job …").
+# Explanations ("scaling stops its pods", "keys are stored encrypted") don't match.
+_CLAIM_VERBS = (r"(started|queued|created|deployed|registered|deleted|removed|cancel+ed|scaled|stored|saved|"
+                r"reloaded|updated|deactivated|invoked|launched|submitted)")
+_ACTION_CLAIM = re.compile(
+    r"\b(?:I(?:'ve| have)?|has been|have been|is now|are now|was)\s+(?:\w+\s+){0,2}" + _CLAIM_VERBS + r"\b"
+    r"|(?:^|[.!]\s+)" + _CLAIM_VERBS + r"\s+(?:the\s+|a\s+|your\s+)?(?:job|pipeline|mcp|server|credential|secret)\b",
+    re.IGNORECASE)
 
-    Standard tool-calling loop: the model picks a tool, we execute it via
-    tools/call with the user's identity, feed the result back, repeat until
-    it answers or the step cap is hit. Returns (answer, tools_called, steps).
+
+# Chat-template control tokens a model occasionally emits as text.
+_TEMPLATE_TOKENS = re.compile(r"<\|im_(?:start|end)\|>(?:assistant|user|system)?|<\|endoftext\|>|</?think>")
+
+
+def _strip_template_tokens(answer: str) -> str:
+    return _TEMPLATE_TOKENS.sub("", answer or "").strip()
+
+
+def _answer_needs_correction(answer: str, writes: Collection[str], schemas: dict) -> str | None:
+    """Correction message for a final answer that must not reach the user, or None."""
+    if not _strip_template_tokens(answer):
+        return ("Your last reply was empty. Answer the user's question in plain text, using the tool "
+                "results above if there are any.")
+    if _TOOL_MARKUP.search(answer):
+        names = [a or b for a, b in _TOOL_MARKUP_NAME.findall(answer)]
+        unknown = [n for n in names if n not in schemas]
+        what = f"'{unknown[0]}' is not one of your tools" if unknown else "that tool call was not valid"
+        return (f"Your last reply contained tool-call markup instead of a tool call: {what}. "
+                f"Available tools: {', '.join(sorted(schemas))}. Call the right tool, or answer in plain text.")
+    if not writes and _ACTION_CLAIM.search(answer):
+        return ("You said you changed something, but you have not called any tool in this turn, so nothing "
+                "happened. If the user asked for that action, call the tool now. Otherwise answer without "
+                "claiming to have done it.")
+    return None
+
+
+def _repair_tool_args(args: dict, schema: dict | None) -> dict:
+    """Fix the one argument-name slip models make against MCP tool schemas.
+
+    Several control tools take the MCP as `mcp` while others take it as `name`;
+    models carry one over, e.g. mcp_get {"mcp": "x"} where the schema requires
+    {"name": "x"}. When exactly one required key is missing and exactly one key
+    is not in the schema, the unknown key is that argument under the wrong name.
+    Anything less clear-cut is passed through for the tool to reject.
     """
-    mcp = McpControlClient(identity)
-    await mcp.initialize()
-    mcp_tools = await mcp.list_tools()
-    tools = _as_openai_tools(mcp_tools)
-    read_only = {t["name"] for t in mcp_tools
-                 if (t.get("annotations") or {}).get("readOnlyHint")}
+    if not isinstance(args, dict) or not schema:
+        return args
+    props = schema.get("properties") or {}
+    unknown = [k for k in args if k not in props]
+    missing = [k for k in schema.get("required") or [] if k not in args]
+    if len(unknown) == 1 and len(missing) == 1:
+        args = dict(args)
+        args[missing[0]] = args.pop(unknown[0])
+    return args
 
-    selected = model or OPENAI_MODEL
-    generous = needs_generous_budget(selected)
-    messages = [
+
+def _platform_messages(question: str, history: list[dict] | None = None) -> list[dict]:
+    """Opening messages of the platform loop (shared with agent/eval and training data)."""
+    return [
         {"role": "system", "content": (
             "You operate the Sealfleet platform for the user through the tools "
             "provided. Call tools to find out or change things; do not guess. "
@@ -546,10 +623,34 @@ async def run_platform_loop(
         ],
         {"role": "user", "content": question},
     ]
+
+
+async def run_platform_loop(
+    question: str, identity: dict, model: str | None, llm_headers: dict | None,
+    history: list[dict] | None = None,
+) -> tuple[str, list[str], list[dict]]:
+    """Let the model operate the platform through the MCP control server.
+
+    Standard tool-calling loop: the model picks a tool, we execute it via
+    tools/call with the user's identity, feed the result back, repeat until
+    it answers or the step cap is hit. Returns (answer, tools_called, steps).
+    """
+    mcp = McpControlClient(identity)
+    await mcp.initialize()
+    mcp_tools = await mcp.list_tools()
+    tools = _as_openai_tools(mcp_tools)
+    read_only = {t["name"] for t in mcp_tools
+                 if (t.get("annotations") or {}).get("readOnlyHint")}
+    schemas = {t["function"]["name"]: t["function"]["parameters"] for t in tools}
+
+    selected = model or OPENAI_MODEL
+    generous = needs_generous_budget(selected)
+    messages = _platform_messages(question, history)
     called: list[str] = []
     steps: list[dict] = []
     failures: dict[str, int] = {}          # (tool, args) → consecutive failures
     write_results: dict[str, str] = {}     # completed writes → their result
+    corrected = False
 
     def _key(name: str, args: dict) -> str:
         return name + ":" + json.dumps(args, sort_keys=True, default=str)
@@ -569,6 +670,19 @@ async def run_platform_loop(
         tool_calls = msg.tool_calls or []
         if not tool_calls:
             answer = (msg.content or "").strip()
+            # Self-check before answering, once per turn: tool-call markup in
+            # the text (a call to a tool that doesn't exist, returned raw by
+            # the engine) or a claim of having changed something although no
+            # write ran this turn. Either way the user would get a false or
+            # unusable answer, so give the model one correction and continue.
+            correction = None if corrected else _answer_needs_correction(answer, write_results, schemas)
+            answer = _strip_template_tokens(answer)
+            if correction:
+                corrected = True
+                messages.append({"role": "assistant", "content": answer})
+                messages.append({"role": "user", "content": correction})
+                steps.append({"tool": None, "self_check": correction[:200]})
+                continue
             if not answer:
                 answer = "I ran the requested platform operations but the model produced no summary."
             return answer, called, steps
@@ -585,6 +699,7 @@ async def run_platform_loop(
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
+            args = _repair_tool_args(args, schemas.get(tc.function.name))
             key = _key(tc.function.name, args)
             is_write = tc.function.name not in read_only
             if is_write and key in write_results:
@@ -781,11 +896,8 @@ def _history_block(history: list[dict], max_turns: int = 8, max_chars: int = 400
     )
 
 
-async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: str | None = None, llm_headers: dict | None = None, history: list[dict] | None = None) -> tuple[str | None, dict, str]:
-    """Single LLM call to select pipeline and extract arguments.
-    Returns (pipeline_name, arguments, reasoning).
-    Times out after LLM_TIMEOUT seconds → returns (None, {}, '').
-    """
+def _selection_prompt(question: str, pipeline_tools: list[dict], history: list[dict] | None = None) -> str:
+    """The pipeline-selection prompt (shared with agent/eval and training data)."""
     def _args(t: dict) -> str:
         props = t.get("inputSchema", {}).get("properties", {}) or {}
         parts = []
@@ -800,7 +912,7 @@ async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: 
         f"- {t['name']}: {t['description']} (args — {_args(t)})"
         for t in pipeline_tools
     )
-    prompt = f"""Available pipeline tools:
+    return f"""Available pipeline tools:
 {tools_desc}
 - {CREATE_PIPELINE_TOOL}: build and register a NEW pipeline. Choose this only
   when the user asks to create, build, add or define a pipeline or workflow —
@@ -821,6 +933,47 @@ arguments the question explicitly states; OMIT every other argument so its
 default applies — never invent a number, and never pass 0 as a placeholder.
 Return null ONLY when no tool's purpose relates to the question at all:
 {{"tool": null, "arguments": {{}}}}"""
+
+
+def _parse_selection(text: str) -> dict:
+    """Parse the selection JSON, salvaging the tool name when only the arguments
+    are malformed. Small local models sometimes echo the prompt's placeholder
+    and emit e.g. {"tool": "platform", "arguments": {"}} — the choice is still
+    right, and every argument has a default, so fall back to no arguments.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r'"tool"\s*:\s*(null|"([^"]+)")', text)
+        if not m:
+            raise
+        return {"tool": m.group(2), "arguments": {}}
+
+
+def _normalize_sentinel(name: str | None, pipeline_tools: list[dict]) -> str | None:
+    """Map a sentinel the model wrote without its underscores back to it.
+
+    Markdown-trained models read __platform__ as bold and answer "platform";
+    the selection then runs a pipeline that does not exist. A real pipeline of
+    that name still wins.
+    """
+    if not name or name in (PLATFORM_TOOL, CREATE_PIPELINE_TOOL):
+        return name
+    if any(t["name"] == name for t in pipeline_tools):
+        return name
+    bare = name.strip("_*` ").lower()
+    for sentinel in (PLATFORM_TOOL, CREATE_PIPELINE_TOOL):
+        if bare == sentinel.strip("_"):
+            return sentinel
+    return name
+
+
+async def llm_select_pipeline(question: str, pipeline_tools: list[dict], model: str | None = None, llm_headers: dict | None = None, history: list[dict] | None = None) -> tuple[str | None, dict, str]:
+    """Single LLM call to select pipeline and extract arguments.
+    Returns (pipeline_name, arguments, reasoning).
+    Times out after LLM_TIMEOUT seconds → returns (None, {}, '').
+    """
+    prompt = _selection_prompt(question, pipeline_tools, history)
 
     selected = model or OPENAI_MODEL
     generous = needs_generous_budget(selected)
@@ -853,8 +1006,8 @@ Return null ONLY when no tool's purpose relates to the question at all:
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else text[3:]
             text = text.rsplit("```", 1)[0]
-        result = json.loads(text.strip())
-        name = result.get("tool")
+        result = _parse_selection(text.strip())
+        name = _normalize_sentinel(result.get("tool"), pipeline_tools)
         args = result.get("arguments", {})
         if name:
             return name, args, f"LLM selected '{name}' with args {args}."

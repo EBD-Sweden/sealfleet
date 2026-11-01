@@ -25,7 +25,7 @@
     "clsx": "^2.1.1",
     "jose": "^6.2.2",
     "lucide-react": "^0.575.0",
-    "next": "16.2.12",
+    "next": "^16.4.3",
     "next-auth": "^5.0.0-beta.32",
     "pg": "^8.20.0",
     "radix-ui": "^1.4.3",
@@ -44,7 +44,7 @@
     "@vitejs/plugin-react": "^5.1.4",
     "dependency-cruiser": "^17.3.10",
     "eslint": "^9",
-    "eslint-config-next": "16.1.6",
+    "eslint-config-next": "^16.4.3",
     "jsdom": "^28.1.0",
     "shadcn": "^3.8.5",
     "tailwindcss": "^4",
@@ -54,6 +54,8 @@
   },
   "overrides": {
     "postcss": "^8.5.18",
-    "sharp": "^0.35.0"
+    "sharp": "^0.35.5",
+    "nanoid": "^3.3.18",
+    "source-map-js": "^1.2.2"
   }
 }

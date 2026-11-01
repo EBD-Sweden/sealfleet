@@ -1,0 +1,72 @@
+{{- if .Values.exampleMcps.enabled }}
+{{- range $key, $mcp := .Values.exampleMcps.servers }}
+{{- if $mcp.enabled }}
+# Example MCP server "{{ $mcp.name }}" (fake/public data only). The Service name
+# matches the endpoint in runtime/manifests/{{ $mcp.name }}.yaml, or is mapped
+# via router ENDPOINT_OVERRIDES.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $mcp.name }}
+  labels:
+    {{- include "mcpfinder.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: example-mcp
+    app: {{ $mcp.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ $mcp.name }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ $mcp.name }}
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+        app.kubernetes.io/component: example-mcp
+        part-of: mcpfinder
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- include "mcpfinder.scheduling" $ | nindent 6 }}
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mcp
+          image: {{ include "mcpfinder.image" (dict "ctx" $ "svc" $.Values.exampleMcps) | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
+          command: ["python", "-m", "uvicorn", {{ $mcp.app | quote }}, "--host", "0.0.0.0", "--port", "8080"]
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml $.Values.exampleMcps.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $mcp.name }}
+  labels:
+    {{- include "mcpfinder.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: example-mcp
+    app: {{ $mcp.name }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ $mcp.name }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+{{- end }}
+{{- end }}
+{{- end }}

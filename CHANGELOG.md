@@ -13,6 +13,32 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   results. The last turns are replayed to the agent, so follow-up questions
   ("And Bergen?") resolve against the conversation. The chats API rejects
   other users' chat ids with 404; the agent remains stateless.
+- **Helm: full chat stack on local k3s.** The chart deploys `core-agent`,
+  `llm-proxy` (with `llmProxy.local` pinning `local/…` models to an on-cluster
+  OpenAI-compatible server and an optional `cloudSecret` for fallbacks) and the
+  example MCPs, with NetworkPolicies for each, shared
+  `nodeSelector`/`tolerations`/`affinity`, an optional NodePort portal Service,
+  the portal RS256 signing key in the chart Secret, and a migrate Job that can
+  take its SQL from a prebuilt image and seed the operator key.
+  `values-k3s-local.yaml` installs it all on one box.
+- **Agent robustness for small local models.** One self-check before a platform
+  answer (tool-call markup in the text, an empty reply, or a claim of a change
+  when no write ran this turn), stripping of leaked chat-template tokens,
+  repair of a single misnamed tool argument, salvage of a malformed selection
+  JSON, and mapping of `platform`/`create_pipeline` back to their sentinels.
+  `LOCAL_LLM_SYSTEM_PREFIX` / `LOCAL_LLM_EXTRA_BODY` shape requests for
+  `local/` models only.
+- **Planner evaluation and training kit** (`agent/eval`, `agent/train`): a chat
+  benchmark (standard and hard out-of-distribution cases), a LoRA SFT data
+  generator and validator, and LoRA training plus a streaming merge for
+  Nemotron-3-Nano-30B on a single GB10-class box.
+
+### Changed
+- Helm: the chat agent template is `core-agent` (values key `coreAgent`,
+  image `sealfleet-agent`); the 0.8.0 `agent` template and values block are
+  removed so the agent is deployed once. `llmProxy.anthropicApiKey` still works
+  but is deprecated in favour of `llmProxy.cloudSecret`. Charts using
+  `secrets.existingSecret` must now include `NEXTAUTH_RS256_PRIVATE_KEY`.
 
 ## [0.8.0] — Chat on any brain, platform control over MCP, hosted chat
 

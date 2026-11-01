@@ -29,10 +29,22 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- include "mcpfinder.scheduling" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
         - name: fetch-sql
+          {{- if .Values.migrate.sqlImage }}
+          image: {{ .Values.migrate.sqlImage | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              cp -r /sql/db /work/db
+              cp -r /sql/scripts /work/scripts
+              echo "sql assets staged in /work from {{ .Values.migrate.sqlImage }}"
+          {{- else }}
           image: {{ .Values.migrate.git.image | quote }}
           command: ["/bin/sh", "-c"]
           args:
@@ -46,6 +58,7 @@ spec:
               mkdir -p /work/scripts
               cp /src/scripts/001_create_api_keys.sql /work/scripts/ 2>/dev/null || true
               echo "sql assets staged in /work"
+          {{- end }}
           volumeMounts:
             - { name: work, mountPath: /work }
       containers:
@@ -73,6 +86,18 @@ spec:
                 psql "$DATABASE_URL" -f "$f"
               done
               {{- end }}
+              {{- if .Values.migrate.seedRuntimeApiKey }}
+              # The operator key the portal, core-agent and llm-proxy present to
+              # the router (mirrors the compose migrate step).
+              echo "seeding operator api key"
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v key="$RUNTIME_API_KEY" <<'SQL'
+              INSERT INTO api_keys (api_key, tenant_id, name, is_active, action_permissions, allow_identity_delegation)
+              VALUES (:'key', 'local-dev', 'Local Development Key', true,
+                      ARRAY['pipeline.invoke','agent.invoke','agent.register','mcp.server.register','registry.export','registry.import'], true)
+              ON CONFLICT (api_key) DO UPDATE SET action_permissions = EXCLUDED.action_permissions,
+                allow_identity_delegation = EXCLUDED.allow_identity_delegation, is_active = true;
+              SQL
+              {{- end }}
               echo "migrations + seeds complete"
           env:
             - name: DATABASE_URL
@@ -80,6 +105,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "mcpfinder.secretName" . }}
                   key: DATABASE_URL
+            {{- if .Values.migrate.seedRuntimeApiKey }}
+            - name: RUNTIME_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mcpfinder.secretName" . }}
+                  key: RUNTIME_API_KEY
+            {{- end }}
           volumeMounts:
             - { name: work, mountPath: /work }
           resources:
